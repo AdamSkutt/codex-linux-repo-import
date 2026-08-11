@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+build/
+dist/
+.venv/
+venv/
+
+# Local plans and recovery artifacts can contain paths and thread identifiers.
+/plan*.json
+/backups/
+/.codex/
+
+# Editor and OS noise.
+.idea/
+.vscode/
+*~
+.DS_Store

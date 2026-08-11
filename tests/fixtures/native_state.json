@@ -1,0 +1,64 @@
+{
+  "electron-completed-local-data-migration-ids": [
+    "2026-07-13-local-projects"
+  ],
+  "local-projects": {
+    "existing-project": {
+      "id": "existing-project",
+      "name": "Existing Project",
+      "rootPaths": [
+        "/workspace/existing"
+      ],
+      "createdAt": 100,
+      "updatedAt": 200
+    }
+  },
+  "project-order": [
+    "existing-project"
+  ],
+  "thread-project-assignments": {
+    "thread-already": {
+      "projectKind": "local",
+      "projectId": "existing-project",
+      "pendingCoreUpdate": false
+    },
+    "thread-conflict": {
+      "projectKind": "local",
+      "projectId": "some-other-project",
+      "pendingCoreUpdate": false
+    }
+  },
+  "projectless-thread-ids": [
+    "thread-new",
+    "thread-conflict",
+    "thread-archived",
+    "thread-unrelated"
+  ],
+  "sidebar-project-thread-orders": {
+    "existing-project": {
+      "threadIds": [
+        "thread-old",
+        "thread-already"
+      ],
+      "sortKey": "keep-me"
+    }
+  },
+  "electron-persisted-atom-state": {
+    "flat-project-sidebar-preferences-v1": {
+      "chatSortMode": "priority",
+      "initialized": true,
+      "mode": "project",
+      "projectSortMode": "priority"
+    },
+    "unified-sidebar-project-order-v1": [
+      "chatgpt:project:remote-one",
+      "codex:project:existing-project"
+    ],
+    "unrelated-atom": {
+      "preserve": true
+    }
+  },
+  "unknown-top-level": {
+    "preserve": "exactly"
+  }
+}

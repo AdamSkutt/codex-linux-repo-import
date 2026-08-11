@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codex-linux-repo-import"
+version = "0.1.0"
+description = "Group VS Code Codex chats by repository in the native Linux Codex sidebar"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "AdamSkutt" }]
+keywords = ["codex", "chatgpt", "vscode", "linux", "chat-history"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Software Development :: Version Control :: Git",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/AdamSkutt/codex-linux-repo-import"
+Issues = "https://github.com/AdamSkutt/codex-linux-repo-import/issues"
+
+[project.scripts]
+codex-linux-repo-import = "codex_repo_import.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
