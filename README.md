@@ -10,6 +10,11 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License"></a>
 </p>
 
+<p align="center">
+  <a href="assets/codex-linux-repo-import-hero.html">Animation source (HTML)</a> ·
+  <a href="assets/codex-linux-repo-import-hero.png">Social preview (PNG)</a>
+</p>
+
 Bring chats created by the Codex VS Code extension into the native Linux Codex Projects sidebar, grouped by their repository or workspace and ordered by a transparent activity score.
 
 > [!IMPORTANT]
@@ -151,7 +156,7 @@ The scanner reads a session file only far enough to parse its first JSONL record
 
 The plain-text scan and plan display local project paths. A `plan --json` result additionally contains native thread/Project identifiers, and backups contain native state. Treat all of these artifacts as private local data and do not publish them in bug reports.
 
-The repository artwork uses synthetic Project and chat names only. It contains no captured session data or local filesystem paths.
+The repository artwork uses synthetic Project and chat names only. It contains no captured session data or local filesystem paths. Its self-contained HTML source makes no external network requests for the included animation.
 
 ## Contributing
 

@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>codex-linux-repo-import — hero</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #070A0E; display: flex; align-items: center; justify-content: center; min-height: 100vh; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+    #__bundler_loading { position: fixed; bottom: 20px; right: 20px; font: 13px/1.4 -apple-system, BlinkMacSystemFont, sans-serif; color: #666; background: #fff; padding: 8px 14px; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,0.12); z-index: 10000; }
+    #__bundler_thumbnail { position: fixed; inset: 0; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; background: #070A0E; z-index: 9999; }
+    #__bundler_thumbnail svg { width: 100%; height: 100%; object-fit: contain; }
+    #__bundler_placeholder { color: #999; font-size: 14px; }
+  </style>
+  <noscript>
+    <style>#__bundler_loading { display: none; }</style>
+    <div style="position:fixed;bottom:12px;left:12px;font:13px/1.4 -apple-system,BlinkMacSystemFont,sans-serif;color:#999;background:rgba(255,255,255,0.9);padding:6px 12px;border-radius:6px;box-shadow:0 1px 4px rgba(0,0,0,0.08);z-index:10000;">
+      This page requires JavaScript to display.
+    </div>
+  </noscript>
+</head>
+<body>
+  <div id="__bundler_thumbnail">
+  <svg viewBox="0 0 1280 640" xmlns="http://www.w3.org/2000/svg">
+    <rect width="1280" height="640" fill="#0B1017"></rect>
+    <rect x="180" y="230" width="300" height="40" rx="10" fill="#18212B" stroke="#273441"></rect>
+    <rect x="230" y="310" width="300" height="40" rx="10" fill="#18212B" stroke="#273441"></rect>
+    <rect x="180" y="390" width="300" height="40" rx="10" fill="#18212B" stroke="#273441"></rect>
+    <rect x="636" y="140" width="6" height="360" rx="3" fill="#61D8D0"></rect>
+    <rect x="760" y="180" width="340" height="120" rx="16" fill="#141B23" stroke="#61D8D0" stroke-opacity="0.4"></rect>
+    <rect x="760" y="330" width="340" height="120" rx="16" fill="#141B23" stroke="#61D8D0" stroke-opacity="0.4"></rect>
+    <rect x="784" y="212" width="292" height="26" rx="8" fill="#1D2833"></rect>
+    <rect x="784" y="250" width="292" height="26" rx="8" fill="#1D2833"></rect>
+    <rect x="784" y="362" width="292" height="26" rx="8" fill="#1D2833"></rect>
+    <rect x="784" y="400" width="292" height="26" rx="8" fill="#1D2833"></rect>
+  </svg>
+</div>
+  <div id="__bundler_loading">Unpacking...</div>
+
+  <script>
+
+document.addEventListener('DOMContentLoaded', async function() {
+  const loading = document.getElementById('__bundler_loading');
+  function setStatus(msg) { if (loading) loading.textContent = msg; }
+
+  const FONT_MIME = /^(font[/]|application[/](x-)?font-|application[/]vnd\.ms-fontobject)/i;
+  const MIME_TOKEN = /^[\w.+-]+[/][\w.+-]+$/;
+  function toBase64(bytes) {
+    let bin = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    }
+    return btoa(bin);
+  }
+
+  // Error sink persists across replaceWith since it's on window, not the DOM.
+  window.addEventListener('error', function(e) {
+    // Failed resource loads (CSP-blocked links, scripts, images) fire plain
+    // events at the element — warn only; real JS errors carry message/error.
+    if (!e.message && !e.error && e.target && e.target !== window) {
+      console.warn('[bundle] resource failed to load:',
+        e.target.tagName, String(e.target.src || e.target.href || ''));
+      return;
+    }
+    var p = document.body || document.documentElement;
+    var d = document.getElementById('__bundler_err') || p.appendChild(document.createElement('div'));
+    d.id = '__bundler_err';
+    d.style.cssText = 'position:fixed;bottom:12px;left:12px;right:12px;font:12px/1.4 ui-monospace,monospace;background:#2a1215;color:#ff8a80;padding:10px 14px;border-radius:8px;border:1px solid #5c2b2e;z-index:99999;white-space:pre-wrap;max-height:40vh;overflow:auto';
+    d.textContent = (d.textContent ? d.textContent + String.fromCharCode(10) : '') +
+      '[bundle] ' + (e.message || e.type) +
+      (e.filename ? ' (' + e.filename.slice(0, 60) + ':' + e.lineno + ')' : '');
+  }, true);
+
+  try {
+    const manifestEl = document.querySelector('script[type="__bundler/manifest"]');
+    const templateEl = document.querySelector('script[type="__bundler/template"]');
+    if (!manifestEl || !templateEl) {
+      setStatus('Error: missing bundle data');
+      console.error('[bundler] Missing script tags — manifestEl:', !!manifestEl, 'templateEl:', !!templateEl);
+      return;
+    }
+
+    const manifest = JSON.parse(manifestEl.textContent);
+    let template = JSON.parse(templateEl.textContent);
+
+    // Nested page bundles (iframe targets). Each ships ONCE, in the ROOT
+    // document's manifest; frame srcs carry an about:blank#<uuid> marker
+    // instead of a substitutable uuid. Every document mints the blobs for
+    // its OWN frames — from local text at the root, or text obtained from
+    // its DIRECT parent over the relay protocol below — so each frame
+    // navigation stays same-origin with its initiator and a deduped page
+    // loads at any depth on any host, including a file:// download's
+    // opaque origins (where a blob minted by one document cannot be
+    // navigated to by another).
+    const pageOrderEl = document.querySelector('script[type="__bundler/page_order"]');
+    const pageOrder = pageOrderEl ? JSON.parse(pageOrderEl.textContent) : [];
+    const pageSet = new Set(pageOrder);
+    const pageTexts = {};
+
+    // ── Nested-page text protocol (parent-chain relay) ──
+    // Page bundles ship once, in the ROOT document's manifest. Every
+    // document mints the blobs for its OWN frames, obtaining page text
+    // through a strict parent-chain relay: a document only ever SENDS to
+    // its direct parent (which, for every document the publisher's own
+    // runtime minted, is another publisher document) and only ACCEPTS
+    // text from that direct parent; requests from below are honored only
+    // for the document's own child frames, and the ROOT never sends
+    // upward at all. That last rule is load-bearing: the artifact host's
+    // frame-ancestors allows claude.ai (and friends) to frame an
+    // artifact, so window.top can be a FOREIGN document — a top-addressed
+    // protocol would hand page uuids to that ancestor and accept forged
+    // "page text" from it, minting attacker HTML as an artifact-origin
+    // blob document. The chain never touches the ancestor: requests stop
+    // at the root, replies are origin-addressed per hop (never '*' when
+    // an origin exists), and both directions are origin-gated (on https
+    // a foreign sender's origin can never equal this document's; in
+    // opaque contexts — file:// — everything serializes as 'null', where
+    // an embedded EXTERNAL frame still fails the gate by carrying its
+    // own real origin, and a sandboxed child of such a frame is excluded
+    // by the own-child-frames check plus uuid unguessability). Shape is
+    // deny-by-default: one request form, one reply form, no error
+    // replies.
+    // window.origin is the SERIALIZED SECURITY origin ('null' in opaque
+    // contexts such as a sandboxed preview iframe) — location.origin is
+    // computed from the URL and stays 'https://…' even when the document
+    // is sandboxed, which would misgate every opaque chain.
+    const OWN_TARGET = /^https?:[/][/]/.test(window.origin || '')
+      ? window.origin
+      : '*';
+    function trustedOrigin(e) {
+      if (e.origin === window.origin) return true; // https chains; opaque==opaque
+      // file:// trees: Chrome serializes the file document's origin as
+      // 'file://' while the blob: documents it mints serialize as 'null',
+      // so the two legitimate shapes can never string-match — accept the
+      // pair in both directions. https origins never serialize as either,
+      // and sender identity (own child frame / direct parent) is checked
+      // separately.
+      return (
+        (e.origin === 'null' &&
+          (window.origin === 'file://' ||
+            window.location.protocol === 'file:')) ||
+        (/^file:/.test(e.origin) && window.origin === 'null')
+      );
+    }
+    // Non-empty only in the root document (nested bundles ship an empty
+    // island), so it doubles as the root marker: the root answers from
+    // local text and treats a miss as authoritative — never relaying to
+    // its (possibly foreign) parent.
+    const isPageRoot = pageOrder.length > 0;
+    const blobUrls = {};
+    const resourceBlobs = {};
+    const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+    const pendingFrames = {}; // uuid -> [{el, frag}] awaiting text for own frames
+    const pendingRelays = {}; // uuid -> [childWindow] awaiting text to pass down
+    function mountPage(el, frag, text) {
+      const pageBlob = new Blob([text], { type: 'text/html' });
+      const u = URL.createObjectURL(pageBlob);
+      resourceBlobs[u] = pageBlob;
+      el.src = u + frag;
+    }
+    function deliverPage(uuid, text) {
+      const frames = pendingFrames[uuid];
+      delete pendingFrames[uuid];
+      if (frames) for (const f of frames) mountPage(f.el, f.frag, text);
+      const relays = pendingRelays[uuid];
+      delete pendingRelays[uuid];
+      if (relays) {
+        for (const cw of relays) {
+          try { cw.postMessage({ __bundler_page: uuid, __bundler_text: text }, OWN_TARGET); } catch (err) { /* gone */ }
+        }
+      }
+    }
+    function ownFrameWindows() {
+      const out = [];
+      for (const f of Array.from(document.querySelectorAll('iframe'))) {
+        try { if (f.contentWindow) out.push(f.contentWindow); } catch (err) { /* detached */ }
+      }
+      return out;
+    }
+    window.addEventListener('message', function (e) {
+      const d = e.data;
+      if (!d || typeof d !== 'object' || !e.source) return;
+      // Origin gate first; the structural checks below (own-child-frames
+      // for requests, direct-parent + solicited-uuid for replies, the
+      // root's never-relay rule) are what hold in fully opaque chains
+      // where origin strings can't discriminate — a sandboxed root's
+      // FOREIGN wrapper still fails all three even though both serialize
+      // as real-vs-'null' rather than matching.
+      if (!trustedOrigin(e)) return;
+      if (typeof d.__bundler_need === 'string' && UUID_SHAPE.test(d.__bundler_need)) {
+        // Requests are honored only for this document's own child frames.
+        if (ownFrameWindows().indexOf(e.source) < 0) return;
+        const uuid = d.__bundler_need;
+        const text = pageTexts[uuid];
+        if (typeof text === 'string') {
+          try { e.source.postMessage({ __bundler_page: uuid, __bundler_text: text }, OWN_TARGET); } catch (err) { /* gone */ }
+          return;
+        }
+        if (isPageRoot || window.parent === window) return; // authoritative miss
+        const waiting = pendingRelays[uuid];
+        if (waiting) {
+          if (waiting.indexOf(e.source) < 0) waiting.push(e.source);
+          return;
+        }
+        // Never-answered uuids would otherwise accumulate forever under a
+        // request spray; past the cap (far above any real page count) new
+        // relays are dropped rather than remembered.
+        if (Object.keys(pendingRelays).length >= 128) return;
+        pendingRelays[uuid] = [e.source];
+        window.parent.postMessage({ __bundler_need: uuid }, OWN_TARGET);
+      } else if (
+        typeof d.__bundler_page === 'string' &&
+        UUID_SHAPE.test(d.__bundler_page) &&
+        typeof d.__bundler_text === 'string'
+      ) {
+        // The shape test is load-bearing beyond tidiness: the solicited
+        // check below uses the in operator, which matches prototype keys
+        // ('__proto__', 'constructor') — an unshaped key would reach
+        // deliverPage and throw, painting the error banner.
+        // Text is accepted only from the direct parent — the document
+        // that minted this one.
+        if (e.source !== window.parent || window.parent === window) return;
+        if (!(d.__bundler_page in pendingFrames) && !(d.__bundler_page in pendingRelays)) return;
+        deliverPage(d.__bundler_page, d.__bundler_text);
+      }
+    });
+
+    const uuids = Object.keys(manifest);
+    setStatus('Unpacking ' + uuids.length + ' assets...');
+
+    await Promise.all(uuids.map(async (uuid) => {
+      const entry = manifest[uuid];
+      try {
+        const binaryStr = atob(entry.data);
+        const bytes = new Uint8Array(binaryStr.length);
+        for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+
+        let finalBytes = bytes;
+        if (entry.compressed) {
+          if (typeof DecompressionStream !== 'undefined') {
+            const ds = new DecompressionStream('gzip');
+            const writer = ds.writable.getWriter();
+            const reader = ds.readable.getReader();
+            writer.write(bytes);
+            writer.close();
+            const chunks = [];
+            let totalLen = 0;
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              chunks.push(value);
+              totalLen += value.length;
+            }
+            finalBytes = new Uint8Array(totalLen);
+            let offset = 0;
+            for (const chunk of chunks) { finalBytes.set(chunk, offset); offset += chunk.length; }
+          } else {
+            console.warn('DecompressionStream not available, asset ' + uuid + ' may not render');
+          }
+        }
+
+        if (pageSet.has(uuid)) {
+          pageTexts[uuid] = new TextDecoder().decode(finalBytes);
+          return;
+        }
+        if (FONT_MIME.test(entry.mime) && MIME_TOKEN.test(entry.mime)) {
+          // Strict artifact hosts allow font-src data: but not blob:.
+          blobUrls[uuid] = 'data:' + entry.mime + ';base64,' +
+            (entry.compressed ? toBase64(finalBytes) : entry.data);
+        } else {
+          const blob = new Blob([finalBytes], { type: entry.mime });
+          blobUrls[uuid] = URL.createObjectURL(blob);
+          resourceBlobs[blobUrls[uuid]] = blob;
+        }
+      } catch (err) {
+        console.error('Failed to decode asset ' + uuid + ':', err);
+        const blob = new Blob([], { type: entry.mime });
+        blobUrls[uuid] = URL.createObjectURL(blob);
+        resourceBlobs[blobUrls[uuid]] = blob;
+      }
+    }));
+
+    const extResEl = document.querySelector('script[type="__bundler/ext_resources"]');
+    const extResources = extResEl ? JSON.parse(extResEl.textContent) : [];
+    const resourceMap = {};
+    for (const entry of extResources) {
+      if (blobUrls[entry.uuid]) resourceMap[entry.id] = blobUrls[entry.uuid];
+    }
+
+    // Artifact-host CSP (connect-src 'self') refuses fetch() of blob: URLs —
+    // consumers read these Blobs directly. Survives the swap like the error sink.
+    window.__resourceBlobs = resourceBlobs;
+
+    setStatus('Rendering...');
+    // Page uuids have no blob here — they ride inside about:blank#<uuid>
+    // frame markers the pass below resolves after the swap.
+    for (const uuid of uuids) {
+      if (pageSet.has(uuid)) continue;
+      template = template.split(uuid).join(blobUrls[uuid]);
+    }
+
+    // Strip integrity + crossorigin — blob URLs from a file:// document inherit
+    // a null origin, so crossorigin forces a CORS fetch that SRI then rejects.
+    // The manifest bytes are ours; SRI protects against CDN compromise, not this.
+    template = template.replace(/\s+integrity="[^"]*"/gi, '').replace(/\s+crossorigin="[^"]*"/gi, '');
+
+    const resourceScript = '<script>window.__resources = ' +
+      JSON.stringify(resourceMap).replace(/<\//g, '<\\/') +
+      ';</' + 'script>';
+    // Inject after <head> so the DOCTYPE stays first; prepending the script
+    // would push the parser into quirks mode. DOMParser always emits a <head>
+    // (synthesizing one if the source HTML omitted it) but may carry
+    // attributes through, so match the full opening tag. slice() rather than
+    // replace() keeps us clear of $-pattern substitution in resourceScript.
+    const headOpen = template.match(/<head[^>]*>/i);
+    if (headOpen) {
+      const i = headOpen.index + headOpen[0].length;
+      template = template.slice(0, i) + resourceScript + template.slice(i);
+    }
+
+    // Parse the template and swap the root element. Scripts inserted via
+    // DOMParser/replaceWith are inert per spec — re-create each with
+    // createElement so they execute, awaiting onload for src scripts to
+    // preserve ordering (React before ReactDOM before Babel before text/babel).
+    const doc = new DOMParser().parseFromString(template, 'text/html');
+    document.documentElement.replaceWith(doc.documentElement);
+
+    // Resolve page-frame markers: mint this document's own blob for each
+    // framed page — from local text when this is the root, otherwise by
+    // asking the direct parent over the relay protocol above. An
+    // unanswered request leaves the frame on about:blank, the same
+    // degraded state as a refused embed.
+    {
+      const MARKER = /^about:blank#([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(#.*)?$/;
+      const needed = [];
+      for (const el of Array.from(document.querySelectorAll('iframe'))) {
+        const m = MARKER.exec(el.getAttribute('src') || '');
+        if (!m) continue;
+        const text = pageTexts[m[1]];
+        if (typeof text === 'string') {
+          mountPage(el, m[2] || '', text);
+        } else if (window.parent !== window && !isPageRoot) {
+          const had = pendingFrames[m[1]];
+          (pendingFrames[m[1]] = had || []).push({ el: el, frag: m[2] || '' });
+          if (!had) needed.push(m[1]);
+        }
+      }
+      for (const uuid of needed) {
+        window.parent.postMessage({ __bundler_need: uuid }, OWN_TARGET);
+      }
+    }
+
+    const dead = Array.from(document.scripts);
+    for (const old of dead) {
+      const s = document.createElement('script');
+      for (const a of old.attributes) s.setAttribute(a.name, a.value);
+      s.textContent = old.textContent;
+      // text/babel scripts with a src: read and inline. transformScriptTags
+      // does XHR against the src, but blob:null/ from a file:// origin is
+      // silently dropped. Inlining makes it a plain inline babel script,
+      // which transformScriptTags handles unconditionally.
+      if ((s.type === 'text/babel' || s.type === 'text/jsx') && s.src) {
+        const pre = resourceBlobs[s.src.split('#')[0]];
+        s.textContent = pre ? await pre.text() : await (await fetch(s.src)).text();
+        s.removeAttribute('src');
+      }
+      const p = s.src ? new Promise(function(r) { s.onload = s.onerror = r; }) : null;
+      old.replaceWith(s);
+      if (p) await p;
+    }
+    // Babel standalone auto-transforms type=text/babel on DOMContentLoaded,
+    // which fired before we swapped the document. Trigger manually if present.
+    if (window.Babel && typeof window.Babel.transformScriptTags === 'function') {
+      window.Babel.transformScriptTags();
+    }
+  } catch (err) {
+    setStatus('Error unpacking: ' + err.message);
+    console.error('Bundle unpack error:', err);
+  }
+});
+
+  </script>
+
+  <script type="__bundler/manifest">
+{}
+  </script>
+
+  <script type="__bundler/ext_resources">
+[]
+  </script>
+
+  <script type="__bundler/page_order">
+[]
+  </script>
+
+  <script type="__bundler/template">
+"<!DOCTYPE html>\n<html lang=\"en\"><head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=1280\">\n<title>codex-linux-repo-import — hero<\u002Ftitle>\n\n<style>\n  html,body{margin:0;padding:0;background:#05070A;}\n  a{color:#8FE3DC;text-decoration:none}a:hover{color:#BFF1EC}\n  @keyframes gridDrift{0%{transform:translate3d(0,0,0)}100%{transform:translate3d(32px,0,0)}}\n  @keyframes beam{0%,100%{opacity:.30}50%{opacity:.55}}\n  @keyframes pulse{0%{opacity:.85;transform:scaleY(1)}6%{opacity:0;transform:scaleY(.7)}100%{opacity:0;transform:scaleY(.7)}}\n  @keyframes tagIn{\n    0%{opacity:0;transform:scale(.7);background:rgba(240,178,103,.18);border-color:rgba(240,178,103,.55);color:#F5C07A;box-shadow:none}\n    2%{opacity:1;transform:scale(1.14);background:rgba(240,178,103,.30);border-color:rgba(240,178,103,.9);color:#FFDCAA;box-shadow:0 0 20px rgba(240,178,103,.45)}\n    6%{opacity:1;transform:scale(1);background:rgba(240,178,103,.16);border-color:rgba(240,178,103,.6);color:#F0B267;box-shadow:0 0 10px rgba(240,178,103,.18)}\n    14%,99%{opacity:1;transform:scale(1);background:rgba(97,216,208,.10);border-color:rgba(97,216,208,.34);color:#8FE3DC;box-shadow:none}\n    100%{opacity:0;transform:scale(.7)}\n  }\n  @keyframes dockGlow{\n    0%{border-color:rgba(97,216,208,.55);box-shadow:0 0 0 1px rgba(97,216,208,.12),0 0 34px rgba(97,216,208,.10),0 18px 40px rgba(0,0,0,.35)}\n    16%,100%{border-color:#1E2833;box-shadow:0 18px 40px rgba(0,0,0,.35)}\n  }\n  @keyframes chipOn{0%,3%{color:#5C6874}6%,22%{color:#BFF1EC}30%,100%{color:#5C6874}}\n  @keyframes chipHold{0%,3%{color:#5C6874}6%,44%{color:#BFF1EC}50%,100%{color:#5C6874}}\n  @keyframes mote{0%{transform:translate3d(0,0,0);opacity:0}12%{opacity:.55}80%{opacity:.35}100%{transform:translate3d(300px,-14px,0);opacity:0}}\n  @keyframes c0{0%{transform:translate(-1300px,18px) rotate(-1.6deg) scale(.78);opacity:0}3%{transform:translate(-980px,18px) rotate(-1.6deg) scale(.80);opacity:1}13%{transform:translate(-640px,18px) rotate(-1.6deg) scale(.84);opacity:1}22%{transform:translate(-332px,10px) rotate(-.5deg) scale(.93);opacity:1}31%{transform:translate(-140px,3px) rotate(0deg) scale(.99);opacity:1;animation-timing-function:cubic-bezier(.2,.85,.25,1)}38%,93%{transform:translate(0,0) rotate(0deg) scale(1);opacity:1}96%{transform:translate(0,0) rotate(0deg) scale(1);opacity:0}100%{transform:translate(-1300px,18px) rotate(-1.6deg) scale(.78);opacity:0}}\n  @keyframes c1{0%,3.2%{transform:translate(-1300px,100px) rotate(1.2deg) scale(.78);opacity:0}6.2%{transform:translate(-980px,100px) rotate(1.2deg) scale(.80);opacity:1}16.2%{transform:translate(-640px,100px) rotate(1.2deg) scale(.84);opacity:1}25.2%{transform:translate(-332px,55px) rotate(.4deg) scale(.93);opacity:1}34.2%{transform:translate(-140px,18px) rotate(0deg) scale(.99);opacity:1;animation-timing-function:cubic-bezier(.2,.85,.25,1)}41.2%,93%{transform:translate(0,0) rotate(0deg) scale(1);opacity:1}96%{transform:translate(0,0) rotate(0deg) scale(1);opacity:0}100%{transform:translate(-1300px,100px) rotate(1.2deg) scale(.78);opacity:0}}\n  @keyframes c2{0%,6.4%{transform:translate(-1300px,164px) rotate(-.9deg) scale(.78);opacity:0}9.4%{transform:translate(-980px,164px) rotate(-.9deg) scale(.80);opacity:1}19.4%{transform:translate(-640px,164px) rotate(-.9deg) scale(.84);opacity:1}28.4%{transform:translate(-332px,90px) rotate(-.3deg) scale(.93);opacity:1}37.4%{transform:translate(-140px,30px) rotate(0deg) scale(.99);opacity:1;animation-timing-function:cubic-bezier(.2,.85,.25,1)}44.4%,93%{transform:translate(0,0) rotate(0deg) scale(1);opacity:1}96%{transform:translate(0,0) rotate(0deg) scale(1);opacity:0}100%{transform:translate(-1300px,164px) rotate(-.9deg) scale(.78);opacity:0}}\n  @keyframes c3{0%,9.6%{transform:translate(-1300px,138px) rotate(1.8deg) scale(.78);opacity:0}12.6%{transform:translate(-980px,138px) rotate(1.8deg) scale(.80);opacity:1}22.6%{transform:translate(-640px,138px) rotate(1.8deg) scale(.84);opacity:1}31.6%{transform:translate(-332px,76px) rotate(.5deg) scale(.93);opacity:1}40.6%{transform:translate(-140px,25px) rotate(0deg) scale(.99);opacity:1;animation-timing-function:cubic-bezier(.2,.85,.25,1)}47.6%,93%{transform:translate(0,0) rotate(0deg) scale(1);opacity:1}96%{transform:translate(0,0) rotate(0deg) scale(1);opacity:0}100%{transform:translate(-1300px,138px) rotate(1.8deg) scale(.78);opacity:0}}\n  @keyframes c4{0%,12.8%{transform:translate(-1300px,-40px) rotate(-1.3deg) scale(.78);opacity:0}15.8%{transform:translate(-980px,-40px) rotate(-1.3deg) scale(.80);opacity:1}25.8%{transform:translate(-640px,-40px) rotate(-1.3deg) scale(.84);opacity:1}34.8%{transform:translate(-332px,-22px) rotate(-.4deg) scale(.93);opacity:1}43.8%{transform:translate(-140px,-7px) rotate(0deg) scale(.99);opacity:1;animation-timing-function:cubic-bezier(.2,.85,.25,1)}50.8%,93%{transform:translate(0,0) rotate(0deg) scale(1);opacity:1}96%{transform:translate(0,0) rotate(0deg) scale(1);opacity:0}100%{transform:translate(-1300px,-40px) rotate(-1.3deg) scale(.78);opacity:0}}\n  @keyframes c5{0%,16%{transform:translate(-1300px,-346px) rotate(1deg) scale(.78);opacity:0}19%{transform:translate(-980px,-346px) rotate(1deg) scale(.80);opacity:1}29%{transform:translate(-640px,-346px) rotate(1deg) scale(.84);opacity:1}38%{transform:translate(-332px,-190px) rotate(.3deg) scale(.93);opacity:1}47%{transform:translate(-140px,-62px) rotate(0deg) scale(.99);opacity:1;animation-timing-function:cubic-bezier(.2,.85,.25,1)}54%,93%{transform:translate(0,0) rotate(0deg) scale(1);opacity:1}96%{transform:translate(0,0) rotate(0deg) scale(1);opacity:0}100%{transform:translate(-1300px,-346px) rotate(1deg) scale(.78);opacity:0}}\n  @media (prefers-reduced-motion: reduce){*{animation:none !important;transition:none !important}[data-tag]{opacity:1 !important}[data-chip]{color:#BFF1EC !important}}\n  [data-static=\"1\"] *{animation:none !important}\n  [data-static=\"1\"] [data-tag]{opacity:1 !important}\n  [data-static=\"1\"] [data-chip]{color:#BFF1EC !important}\n<\u002Fstyle>\n<\u002Fhead>\n<body>\n\n<div style=\"min-height:100vh;display:flex;align-items:center;justify-content:center;background:#05070A;padding:24px;box-sizing:border-box\">\n<div id=\"stage\" style=\"position:relative;width:1280px;height:640px;overflow:hidden;background:radial-gradient(1100px 620px at 24% 6%, #121A23 0%, #0B1017 46%, #070A0E 100%);font-family:-apple-system,'Segoe UI','Helvetica Neue',Helvetica,Arial,sans-serif;color:#EEF3F8;box-shadow:0 40px 120px rgba(0,0,0,.6)\">\n\n  <div style=\"position:absolute;inset:-40px;background-image:radial-gradient(rgba(150,175,200,.10) 1px, transparent 1px);background-size:32px 32px;opacity:.5;animation:gridDrift 7s linear infinite\"><\u002Fdiv>\n  <div style=\"position:absolute;inset:0;background:linear-gradient(90deg,rgba(5,7,10,.55) 0%,rgba(5,7,10,0) 22%,rgba(5,7,10,0) 74%,rgba(5,7,10,.45) 100%)\"><\u002Fdiv>\n  <div style=\"position:absolute;inset:0;box-shadow:inset 0 0 160px rgba(0,0,0,.7)\"><\u002Fdiv>\n\n  <div style=\"position:absolute;left:64px;top:60px;width:660px\">\n    <div style=\"font-size:42px;line-height:1.16;font-weight:600;letter-spacing:-.6px;color:#EEF3F8;text-wrap:pretty\">Turn scattered Codex chats<br>into native Linux Projects<\u002Fdiv>\n    <div style=\"margin-top:20px;font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;font-size:13px;letter-spacing:.2px;color:#7E8C9B\">Local-only • Dry-run first • Backup + rollback<\u002Fdiv>\n  <\u002Fdiv>\n\n  <div style=\"position:absolute;left:64px;top:552px;display:flex;align-items:center;gap:12px;font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;font-size:13px;letter-spacing:1px;color:#5C6874\">\n    <span style=\"animation:chipOn 7s linear infinite;animation-delay:.2s\">scan<\u002Fspan>\n    <span style=\"color:#2E3A46\">→<\u002Fspan>\n    <span style=\"animation:chipOn 7s linear infinite;animation-delay:2.1s\">plan<\u002Fspan>\n    <span style=\"color:#2E3A46\">→<\u002Fspan>\n    <span data-chip=\"apply\" style=\"animation:chipHold 7s linear infinite;animation-delay:3.5s\">apply<\u002Fspan>\n  <\u002Fdiv>\n\n  <div style=\"position:absolute;left:520px;top:0;width:240px;height:640px;background:linear-gradient(90deg,rgba(97,216,208,0) 0%,rgba(97,216,208,.05) 50%,rgba(97,216,208,0) 100%)\"><\u002Fdiv>\n  <div style=\"position:absolute;left:600px;top:150px;width:80px;height:400px;filter:blur(26px);background:radial-gradient(closest-side,rgba(97,216,208,.28),rgba(97,216,208,0))\"><\u002Fdiv>\n  <div style=\"position:absolute;left:639px;top:150px;width:2px;height:400px;background:linear-gradient(180deg,rgba(97,216,208,0),rgba(97,216,208,.85) 18%,rgba(97,216,208,.85) 82%,rgba(97,216,208,0));animation:beam 7s ease-in-out infinite\"><\u002Fdiv>\n  <div style=\"position:absolute;left:634px;top:150px;opacity:0;width:7px;height:400px;background:linear-gradient(180deg,rgba(240,178,103,0),rgba(255,214,160,.42) 30%,rgba(255,214,160,.42) 70%,rgba(240,178,103,0));filter:blur(4px);transform-origin:50% 50%;animation:pulse 7s ease-out infinite;animation-delay:1.54s\"><\u002Fdiv>\n  <div style=\"position:absolute;left:634px;top:150px;opacity:0;width:7px;height:400px;background:linear-gradient(180deg,rgba(240,178,103,0),rgba(255,214,160,.42) 30%,rgba(255,214,160,.42) 70%,rgba(240,178,103,0));filter:blur(4px);transform-origin:50% 50%;animation:pulse 7s ease-out infinite;animation-delay:1.764s\"><\u002Fdiv>\n  <div style=\"position:absolute;left:634px;top:150px;opacity:0;width:7px;height:400px;background:linear-gradient(180deg,rgba(240,178,103,0),rgba(255,214,160,.42) 30%,rgba(255,214,160,.42) 70%,rgba(240,178,103,0));filter:blur(4px);transform-origin:50% 50%;animation:pulse 7s ease-out infinite;animation-delay:1.988s\"><\u002Fdiv>\n  <div style=\"position:absolute;left:634px;top:150px;opacity:0;width:7px;height:400px;background:linear-gradient(180deg,rgba(240,178,103,0),rgba(255,214,160,.42) 30%,rgba(255,214,160,.42) 70%,rgba(240,178,103,0));filter:blur(4px);transform-origin:50% 50%;animation:pulse 7s ease-out infinite;animation-delay:2.212s\"><\u002Fdiv>\n  <div style=\"position:absolute;left:634px;top:150px;opacity:0;width:7px;height:400px;background:linear-gradient(180deg,rgba(240,178,103,0),rgba(255,214,160,.42) 30%,rgba(255,214,160,.42) 70%,rgba(240,178,103,0));filter:blur(4px);transform-origin:50% 50%;animation:pulse 7s ease-out infinite;animation-delay:2.436s\"><\u002Fdiv>\n  <div style=\"position:absolute;left:634px;top:150px;opacity:0;width:7px;height:400px;background:linear-gradient(180deg,rgba(240,178,103,0),rgba(255,214,160,.42) 30%,rgba(255,214,160,.42) 70%,rgba(240,178,103,0));filter:blur(4px);transform-origin:50% 50%;animation:pulse 7s ease-out infinite;animation-delay:2.66s\"><\u002Fdiv>\n\n  <div style=\"position:absolute;left:120px;top:238px;width:3px;height:3px;border-radius:50%;background:#61D8D0;animation:mote 7s linear infinite;animation-delay:-.4s\"><\u002Fdiv>\n  <div style=\"position:absolute;left:180px;top:322px;width:2px;height:2px;border-radius:50%;background:#8FE3DC;animation:mote 7s linear infinite;animation-delay:-1.9s\"><\u002Fdiv>\n  <div style=\"position:absolute;left:96px;top:452px;width:2px;height:2px;border-radius:50%;background:#61D8D0;animation:mote 7s linear infinite;animation-delay:-3.3s\"><\u002Fdiv>\n  <div style=\"position:absolute;left:250px;top:198px;width:2px;height:2px;border-radius:50%;background:#4FB8B2;animation:mote 7s linear infinite;animation-delay:-5.1s\"><\u002Fdiv>\n  <div style=\"position:absolute;left:310px;top:508px;width:3px;height:3px;border-radius:50%;background:#4FB8B2;animation:mote 7s linear infinite;animation-delay:-2.4s\"><\u002Fdiv>\n  <div style=\"position:absolute;left:150px;top:566px;width:2px;height:2px;border-radius:50%;background:#61D8D0;animation:mote 7s linear infinite;animation-delay:-6.2s\"><\u002Fdiv>\n  <div style=\"position:absolute;left:400px;top:280px;width:2px;height:2px;border-radius:50%;background:#8FE3DC;animation:mote 7s linear infinite;animation-delay:-.9s\"><\u002Fdiv>\n  <div style=\"position:absolute;left:460px;top:400px;width:2px;height:2px;border-radius:50%;background:#61D8D0;animation:mote 7s linear infinite;animation-delay:-4.4s\"><\u002Fdiv>\n  <div style=\"position:absolute;left:214px;top:600px;width:2px;height:2px;border-radius:50%;background:#4FB8B2;animation:mote 7s linear infinite;animation-delay:-3.8s\"><\u002Fdiv>\n  <div style=\"position:absolute;left:340px;top:170px;width:2px;height:2px;border-radius:50%;background:#61D8D0;animation:mote 7s linear infinite;animation-delay:-1.3s\"><\u002Fdiv>\n  <div style=\"position:absolute;left:520px;top:222px;width:2px;height:2px;border-radius:50%;background:#8FE3DC;animation:mote 7s linear infinite;animation-delay:-5.7s\"><\u002Fdiv>\n  <div style=\"position:absolute;left:560px;top:486px;width:2px;height:2px;border-radius:50%;background:#4FB8B2;animation:mote 7s linear infinite;animation-delay:-2.9s\"><\u002Fdiv>\n\n  <div style=\"position:absolute;left:700px;top:150px;width:540px;height:470px;filter:blur(40px);background:radial-gradient(closest-side,rgba(97,216,208,.07),rgba(97,216,208,0))\"><\u002Fdiv>\n  <div style=\"position:absolute;left:752px;top:180px;width:428px;height:112px;border-radius:12px;background:linear-gradient(180deg,rgba(20,27,35,.72),rgba(12,17,23,.72));border:1px solid #1E2833;box-shadow:0 18px 40px rgba(0,0,0,.35);animation:dockGlow 7s linear infinite;animation-delay:2.88s\">\n    <div style=\"position:absolute;left:14px;top:8px;display:flex;align-items:center;gap:9px\">\n      <div style=\"position:relative;width:15px;height:12px;border:1px solid rgba(143,227,220,.55);border-radius:3px;background:rgba(97,216,208,.08)\"><div style=\"position:absolute;left:1px;top:-4px;width:6px;height:3px;border-radius:2px 2px 0 0;background:rgba(143,227,220,.55)\"><\u002Fdiv><\u002Fdiv>\n      <div style=\"font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;font-size:13px;letter-spacing:.2px;color:#DCE6EF\">nebula-api<\u002Fdiv>\n    <\u002Fdiv>\n    <div style=\"position:absolute;left:14px;top:32px;width:400px;height:32px;border-radius:7px;border:1px dashed rgba(130,150,170,.10)\"><\u002Fdiv>\n    <div style=\"position:absolute;left:14px;top:70px;width:400px;height:32px;border-radius:7px;border:1px dashed rgba(130,150,170,.10)\"><\u002Fdiv>\n  <\u002Fdiv>\n\n  <div style=\"position:absolute;left:752px;top:304px;width:428px;height:74px;border-radius:12px;background:linear-gradient(180deg,rgba(20,27,35,.72),rgba(12,17,23,.72));border:1px solid #1E2833;box-shadow:0 18px 40px rgba(0,0,0,.35);animation:dockGlow 7s linear infinite;animation-delay:3.11s\">\n    <div style=\"position:absolute;left:14px;top:8px;display:flex;align-items:center;gap:9px\">\n      <div style=\"position:relative;width:15px;height:12px;border:1px solid rgba(143,227,220,.55);border-radius:3px;background:rgba(97,216,208,.08)\"><div style=\"position:absolute;left:1px;top:-4px;width:6px;height:3px;border-radius:2px 2px 0 0;background:rgba(143,227,220,.55)\"><\u002Fdiv><\u002Fdiv>\n      <div style=\"font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;font-size:13px;letter-spacing:.2px;color:#DCE6EF\">pixel-forge<\u002Fdiv>\n    <\u002Fdiv>\n    <div style=\"position:absolute;left:14px;top:32px;width:400px;height:32px;border-radius:7px;border:1px dashed rgba(130,150,170,.10)\"><\u002Fdiv>\n  <\u002Fdiv>\n\n  <div style=\"position:absolute;left:752px;top:390px;width:428px;height:112px;border-radius:12px;background:linear-gradient(180deg,rgba(20,27,35,.72),rgba(12,17,23,.72));border:1px solid #1E2833;box-shadow:0 18px 40px rgba(0,0,0,.35);animation:dockGlow 7s linear infinite;animation-delay:3.56s\">\n    <div style=\"position:absolute;left:14px;top:8px;display:flex;align-items:center;gap:9px\">\n      <div style=\"position:relative;width:15px;height:12px;border:1px solid rgba(143,227,220,.55);border-radius:3px;background:rgba(97,216,208,.08)\"><div style=\"position:absolute;left:1px;top:-4px;width:6px;height:3px;border-radius:2px 2px 0 0;background:rgba(143,227,220,.55)\"><\u002Fdiv><\u002Fdiv>\n      <div style=\"font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;font-size:13px;letter-spacing:.2px;color:#DCE6EF\">orbit-cli<\u002Fdiv>\n    <\u002Fdiv>\n    <div style=\"position:absolute;left:14px;top:32px;width:400px;height:32px;border-radius:7px;border:1px dashed rgba(130,150,170,.10)\"><\u002Fdiv>\n    <div style=\"position:absolute;left:14px;top:70px;width:400px;height:32px;border-radius:7px;border:1px dashed rgba(130,150,170,.10)\"><\u002Fdiv>\n  <\u002Fdiv>\n\n  <div style=\"position:absolute;left:752px;top:514px;width:428px;height:74px;border-radius:12px;background:linear-gradient(180deg,rgba(20,27,35,.72),rgba(12,17,23,.72));border:1px solid #1E2833;box-shadow:0 18px 40px rgba(0,0,0,.35);animation:dockGlow 7s linear infinite;animation-delay:3.78s\">\n    <div style=\"position:absolute;left:14px;top:8px;display:flex;align-items:center;gap:9px\">\n      <div style=\"position:relative;width:15px;height:12px;border:1px solid rgba(143,227,220,.55);border-radius:3px;background:rgba(97,216,208,.08)\"><div style=\"position:absolute;left:1px;top:-4px;width:6px;height:3px;border-radius:2px 2px 0 0;background:rgba(143,227,220,.55)\"><\u002Fdiv><\u002Fdiv>\n      <div style=\"font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;font-size:13px;letter-spacing:.2px;color:#DCE6EF\">atlas-notes<\u002Fdiv>\n    <\u002Fdiv>\n    <div style=\"position:absolute;left:14px;top:32px;width:400px;height:32px;border-radius:7px;border:1px dashed rgba(130,150,170,.10)\"><\u002Fdiv>\n  <\u002Fdiv>\n\n  <div style=\"position:absolute;left:766px;top:212px;width:400px;height:32px;box-sizing:border-box;display:flex;align-items:center;gap:10px;padding:0 10px;border-radius:7px;background:linear-gradient(180deg,#18212B,#111922);border:1px solid #273441;box-shadow:0 10px 26px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,.04);animation:c0 7s linear infinite\">\n    <div style=\"width:13px;height:10px;border-radius:3px;border:1px solid rgba(143,227,220,.45);background:rgba(97,216,208,.07);flex:none\"><\u002Fdiv>\n    <div style=\"font-size:13px;letter-spacing:-.1px;color:#D5E0EA;white-space:nowrap\">Add OAuth callback tests<\u002Fdiv>\n    <div style=\"flex:1\"><\u002Fdiv>\n    <div data-tag=\"1\" style=\"font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;font-size:10px;letter-spacing:.3px;padding:3px 7px;border-radius:99px;border:1px solid rgba(97,216,208,.34);background:rgba(97,216,208,.10);color:#8FE3DC;opacity:0;animation:tagIn 7s linear infinite;animation-delay:1.54s\">nebula-api<\u002Fdiv>\n  <\u002Fdiv>\n\n  <div style=\"position:absolute;left:766px;top:250px;width:400px;height:32px;box-sizing:border-box;display:flex;align-items:center;gap:10px;padding:0 10px;border-radius:7px;background:linear-gradient(180deg,#18212B,#111922);border:1px solid #273441;box-shadow:0 10px 26px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,.04);animation:c1 7s linear infinite\">\n    <div style=\"width:13px;height:10px;border-radius:3px;border:1px solid rgba(143,227,220,.45);background:rgba(97,216,208,.07);flex:none\"><\u002Fdiv>\n    <div style=\"font-size:13px;letter-spacing:-.1px;color:#D5E0EA;white-space:nowrap\">Improve rate limits<\u002Fdiv>\n    <div style=\"flex:1\"><\u002Fdiv>\n    <div data-tag=\"1\" style=\"font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;font-size:10px;letter-spacing:.3px;padding:3px 7px;border-radius:99px;border:1px solid rgba(97,216,208,.34);background:rgba(97,216,208,.10);color:#8FE3DC;opacity:0;animation:tagIn 7s linear infinite;animation-delay:1.764s\">nebula-api<\u002Fdiv>\n  <\u002Fdiv>\n\n  <div style=\"position:absolute;left:766px;top:336px;width:400px;height:32px;box-sizing:border-box;display:flex;align-items:center;gap:10px;padding:0 10px;border-radius:7px;background:linear-gradient(180deg,#18212B,#111922);border:1px solid #273441;box-shadow:0 10px 26px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,.04);animation:c2 7s linear infinite\">\n    <div style=\"width:13px;height:10px;border-radius:3px;border:1px solid rgba(143,227,220,.45);background:rgba(97,216,208,.07);flex:none\"><\u002Fdiv>\n    <div style=\"font-size:13px;letter-spacing:-.1px;color:#D5E0EA;white-space:nowrap\">Fix image cache<\u002Fdiv>\n    <div style=\"flex:1\"><\u002Fdiv>\n    <div data-tag=\"1\" style=\"font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;font-size:10px;letter-spacing:.3px;padding:3px 7px;border-radius:99px;border:1px solid rgba(97,216,208,.34);background:rgba(97,216,208,.10);color:#8FE3DC;opacity:0;animation:tagIn 7s linear infinite;animation-delay:1.988s\">pixel-forge<\u002Fdiv>\n  <\u002Fdiv>\n\n  <div style=\"position:absolute;left:766px;top:422px;width:400px;height:32px;box-sizing:border-box;display:flex;align-items:center;gap:10px;padding:0 10px;border-radius:7px;background:linear-gradient(180deg,#18212B,#111922);border:1px solid #273441;box-shadow:0 10px 26px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,.04);animation:c3 7s linear infinite\">\n    <div style=\"width:13px;height:10px;border-radius:3px;border:1px solid rgba(143,227,220,.45);background:rgba(97,216,208,.07);flex:none\"><\u002Fdiv>\n    <div style=\"font-size:13px;letter-spacing:-.1px;color:#D5E0EA;white-space:nowrap\">Prepare Linux release<\u002Fdiv>\n    <div style=\"flex:1\"><\u002Fdiv>\n    <div data-tag=\"1\" style=\"font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;font-size:10px;letter-spacing:.3px;padding:3px 7px;border-radius:99px;border:1px solid rgba(97,216,208,.34);background:rgba(97,216,208,.10);color:#8FE3DC;opacity:0;animation:tagIn 7s linear infinite;animation-delay:2.212s\">orbit-cli<\u002Fdiv>\n  <\u002Fdiv>\n\n  <div style=\"position:absolute;left:766px;top:460px;width:400px;height:32px;box-sizing:border-box;display:flex;align-items:center;gap:10px;padding:0 10px;border-radius:7px;background:linear-gradient(180deg,#18212B,#111922);border:1px solid #273441;box-shadow:0 10px 26px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,.04);animation:c4 7s linear infinite\">\n    <div style=\"width:13px;height:10px;border-radius:3px;border:1px solid rgba(143,227,220,.45);background:rgba(97,216,208,.07);flex:none\"><\u002Fdiv>\n    <div style=\"font-size:13px;letter-spacing:-.1px;color:#D5E0EA;white-space:nowrap\">Add rollback command<\u002Fdiv>\n    <div style=\"flex:1\"><\u002Fdiv>\n    <div data-tag=\"1\" style=\"font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;font-size:10px;letter-spacing:.3px;padding:3px 7px;border-radius:99px;border:1px solid rgba(97,216,208,.34);background:rgba(97,216,208,.10);color:#8FE3DC;opacity:0;animation:tagIn 7s linear infinite;animation-delay:2.436s\">orbit-cli<\u002Fdiv>\n  <\u002Fdiv>\n\n  <div style=\"position:absolute;left:766px;top:546px;width:400px;height:32px;box-sizing:border-box;display:flex;align-items:center;gap:10px;padding:0 10px;border-radius:7px;background:linear-gradient(180deg,#18212B,#111922);border:1px solid #273441;box-shadow:0 10px 26px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,.04);animation:c5 7s linear infinite\">\n    <div style=\"width:13px;height:10px;border-radius:3px;border:1px solid rgba(143,227,220,.45);background:rgba(97,216,208,.07);flex:none\"><\u002Fdiv>\n    <div style=\"font-size:13px;letter-spacing:-.1px;color:#D5E0EA;white-space:nowrap\">Refactor search index<\u002Fdiv>\n    <div style=\"flex:1\"><\u002Fdiv>\n    <div data-tag=\"1\" style=\"font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;font-size:10px;letter-spacing:.3px;padding:3px 7px;border-radius:99px;border:1px solid rgba(97,216,208,.34);background:rgba(97,216,208,.10);color:#8FE3DC;opacity:0;animation:tagIn 7s linear infinite;animation-delay:2.66s\">atlas-notes<\u002Fdiv>\n  <\u002Fdiv>\n\n<\u002Fdiv>\n<\u002Fdiv>\n\n<\u002Fbody><\u002Fhtml>"
+  </script>
+</body>
+</html>
