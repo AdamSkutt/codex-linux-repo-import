@@ -8,12 +8,14 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import pwd
+import stat
 import subprocess
 import tempfile
 from typing import Any, Iterator
 
 from . import __version__
-from .planner import ImportPlan, encode_state, sha256_bytes
+from .planner import ImportPlan, UNLINKED_PROJECT_NAME, encode_state, sha256_bytes
 
 
 TESTED_DESKTOP_VERSIONS = frozenset({"26.803.81509"})
@@ -28,6 +30,7 @@ TOUCHED_PATHS = (
     ("electron-persisted-atom-state", "unified-sidebar-project-order-v1"),
 )
 _MISSING = object()
+MANAGED_DIRECTORY_KIND = "create_unlinked_project_root"
 
 
 class NativeStateError(RuntimeError):
@@ -53,6 +56,42 @@ class Compatibility:
     @property
     def tested(self) -> bool:
         return self.level == "tested"
+
+
+@dataclass(frozen=True)
+class ManagedDirectoryIntent:
+    """A narrowly-scoped filesystem mutation declared by an import plan.
+
+    This is intentionally not a callback or a generic file operation.  The
+    native-state transaction only knows how to create one private, single-leaf
+    workspace directory for otherwise-unlinked Desktop sessions.
+    """
+
+    kind: str
+    path: Path
+    mode: int = 0o700
+
+    def to_manifest(self) -> dict[str, str]:
+        return {"kind": self.kind, "path": str(self.path), "mode": "0700"}
+
+
+@dataclass(frozen=True)
+class _PreparedManagedDirectory:
+    intent: ManagedDirectoryIntent
+    parent: Path
+    name: str
+    parent_device: int
+    parent_inode: int
+
+
+@dataclass(frozen=True)
+class _VerifiedManagedDirectory:
+    intent: ManagedDirectoryIntent
+    device: int
+    inode: int
+    mode: int
+    require_empty: bool
+    require_private_mode: bool
 
 
 def detect_desktop_version() -> str | None:
@@ -393,6 +432,147 @@ def _valid_journal_slot(value: object) -> bool:
     return value["present"] is False or "value" in value
 
 
+def _decode_managed_directory_entries(value: object) -> list[ManagedDirectoryIntent]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise NativeStateError("managed_directories must be a list")
+    if len(value) > 1:
+        raise NativeStateError("only one managed directory is supported per import")
+
+    intents: list[ManagedDirectoryIntent] = []
+    for entry in value:
+        if not isinstance(entry, dict) or set(entry) != {"kind", "path", "mode"}:
+            raise NativeStateError(
+                "managed directory entries require exactly kind, path, and mode"
+            )
+        if entry.get("kind") != MANAGED_DIRECTORY_KIND:
+            raise NativeStateError("unsupported managed directory kind")
+        raw_path = entry.get("path")
+        if not isinstance(raw_path, str) or not raw_path or "\x00" in raw_path:
+            raise NativeStateError("managed directory path must be a non-empty string")
+        if not os.path.isabs(raw_path) or os.path.normpath(raw_path) != raw_path:
+            raise NativeStateError("managed directory path must be canonical and absolute")
+        if entry.get("mode") != "0700":
+            raise NativeStateError("managed directory mode must be 0700")
+        intents.append(
+            ManagedDirectoryIntent(
+                kind=MANAGED_DIRECTORY_KIND,
+                path=Path(raw_path),
+            )
+        )
+    return intents
+
+
+def _managed_directory_intents(plan: ImportPlan) -> list[ManagedDirectoryIntent]:
+    external = plan.manifest.get("external_changes")
+    if external is None:
+        return []
+    if not isinstance(external, dict) or set(external) != {"managed_directories"}:
+        raise NativeStateError(
+            "external_changes may contain only the managed_directories list"
+        )
+    return _decode_managed_directory_entries(external.get("managed_directories"))
+
+
+def _exact_unlinked_project_link(
+    state: dict[str, Any],
+    intent: ManagedDirectoryIntent,
+    *,
+    state_label: str,
+) -> bool:
+    """Require one fixed-name, single-root fallback Project or no linkage.
+
+    A filesystem intent must never be widened by a multi-root Project, an
+    ordinary Project that happens to reference the path, or two fallback
+    Projects with the same semantic role.  An absent linkage is allowed here
+    because ``options.unlinked_project_root`` is also present on plans that
+    ultimately have no fallback chats to assign.
+    """
+
+    projects = state.get("local-projects", {})
+    if not isinstance(projects, dict):
+        raise NativeStateError(f"{state_label} local-projects must be an object")
+    target = str(intent.path)
+    normalized_target = os.path.normcase(os.path.normpath(target))
+    exact_ids: list[str] = []
+    for project_id, project in projects.items():
+        if not isinstance(project, dict):
+            continue
+        roots = project.get("rootPaths")
+        references_target = isinstance(roots, list) and any(
+            isinstance(root, str)
+            and os.path.normcase(os.path.normpath(root)) == normalized_target
+            for root in roots
+        )
+        name = project.get("name")
+        has_fallback_name = name == UNLINKED_PROJECT_NAME
+        has_fallback_name_collision = (
+            isinstance(name, str)
+            and name.casefold() == UNLINKED_PROJECT_NAME.casefold()
+        )
+        if not references_target and not has_fallback_name_collision:
+            continue
+        if not has_fallback_name or roots != [target]:
+            raise NativeStateError(
+                f"{state_label} fallback Project must use the fixed name "
+                f"{UNLINKED_PROJECT_NAME!r} and exactly one matching root"
+            )
+        if not isinstance(project_id, str) or not project_id:
+            raise NativeStateError(f"{state_label} fallback Project id is invalid")
+        exact_ids.append(project_id)
+    if len(exact_ids) > 1:
+        raise NativeStateError(f"{state_label} contains duplicate fallback Project linkages")
+    return bool(exact_ids)
+
+
+def _unlinked_project_root_intent(
+    plan: ImportPlan,
+    managed: list[ManagedDirectoryIntent],
+) -> ManagedDirectoryIntent | None:
+    options = plan.manifest.get("options")
+    raw_path = options.get("unlinked_project_root") if isinstance(options, dict) else None
+    if raw_path is None:
+        if managed:
+            raise NativeStateError(
+                "managed directory requires the same options.unlinked_project_root"
+            )
+        return None
+    if not isinstance(raw_path, str) or not raw_path or "\x00" in raw_path:
+        raise NativeStateError("unlinked_project_root must be a non-empty absolute path")
+    if not os.path.isabs(raw_path) or os.path.normpath(raw_path) != raw_path:
+        raise NativeStateError("unlinked_project_root must be canonical and absolute")
+    intent = ManagedDirectoryIntent(MANAGED_DIRECTORY_KIND, Path(raw_path))
+    if managed and managed != [intent]:
+        raise NativeStateError(
+            "managed directory does not match options.unlinked_project_root"
+        )
+
+    referenced = _exact_unlinked_project_link(
+        plan.after_state,
+        intent,
+        state_label="planned native state",
+    )
+    if not referenced:
+        if managed:
+            raise NativeStateError(
+                "managed directory is not linked to exactly one planned fallback Project"
+            )
+        return None
+    return intent
+
+
+def _has_existing_native_unlinked_project(
+    plan: ImportPlan,
+    intent: ManagedDirectoryIntent,
+) -> bool:
+    return _exact_unlinked_project_link(
+        plan.before_state,
+        intent,
+        state_label="current native state",
+    )
+
+
 class NativeStateStore:
     def __init__(
         self,
@@ -400,12 +580,18 @@ class NativeStateStore:
         *,
         backup_root: Path | None = None,
         proc_root: Path = Path("/proc"),
+        home: Path | None = None,
     ) -> None:
         self.state_file = state_file
         self.state_backup_file = state_file.with_name(state_file.name + ".bak")
         self.backup_root = backup_root or state_file.parent / "backups" / "codex-linux-repo-import"
         self.proc_root = proc_root
         self.lock_file = state_file.parent / ".codex-linux-repo-import.lock"
+        # Do not trust HOME for the production mutation boundary.  Tests may
+        # inject an isolated home, while real runs use the login directory of
+        # the effective user that will own the new workspace.
+        effective_home = home or Path(pwd.getpwuid(os.geteuid()).pw_dir)
+        self.home = effective_home.expanduser().absolute()
 
     def snapshot(self) -> StateSnapshot:
         return load_snapshot(self.state_file)
@@ -450,6 +636,247 @@ class NativeStateStore:
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             handle.close()
+
+    def _prepare_managed_directory(
+        self,
+        intent: ManagedDirectoryIntent,
+        *,
+        require_missing: bool,
+    ) -> _PreparedManagedDirectory:
+        uid = os.geteuid()
+        if uid == 0:
+            raise NativeStateError("managed directory creation is refused for root")
+
+        try:
+            home = self.home.resolve(strict=True)
+            home_lstat = self.home.lstat()
+        except OSError as exc:
+            raise NativeStateError(f"cannot resolve the user home directory: {exc}") from exc
+        if self.home != home or stat.S_ISLNK(home_lstat.st_mode):
+            raise NativeStateError("the user home path must be canonical and not a symlink")
+        if not stat.S_ISDIR(home_lstat.st_mode) or home_lstat.st_uid != uid:
+            raise NativeStateError("the user home directory must be owned by the current user")
+        if home_lstat.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise NativeStateError("the user home directory must not be group/world-writable")
+        if home_lstat.st_mode & stat.S_IXUSR == 0:
+            raise NativeStateError("the user home directory must be searchable")
+
+        desktop_path = home / "Desktop"
+        try:
+            desktop_lstat = desktop_path.lstat()
+            desktop = desktop_path.resolve(strict=True)
+        except OSError as exc:
+            raise NativeStateError(f"cannot resolve the Desktop directory: {exc}") from exc
+        if desktop != desktop_path or stat.S_ISLNK(desktop_lstat.st_mode):
+            raise NativeStateError("the Desktop directory must be canonical and not a symlink")
+        if not stat.S_ISDIR(desktop_lstat.st_mode) or desktop_lstat.st_uid != uid:
+            raise NativeStateError("the Desktop directory must be owned by the current user")
+        if desktop_lstat.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise NativeStateError("the Desktop directory must not be group/world-writable")
+        if desktop_lstat.st_mode & stat.S_IWUSR == 0 or desktop_lstat.st_mode & stat.S_IXUSR == 0:
+            raise NativeStateError("the Desktop directory must be writable and searchable")
+
+        target = intent.path
+        if not target.name or target.name in {".", ".."}:
+            raise NativeStateError("managed directory needs a safe single-leaf name")
+        parent_path = target.parent
+        try:
+            parent_lstat = parent_path.lstat()
+            parent = parent_path.resolve(strict=True)
+        except OSError as exc:
+            raise NativeStateError(f"managed directory parent is unavailable: {exc}") from exc
+        if parent != parent_path or stat.S_ISLNK(parent_lstat.st_mode):
+            raise NativeStateError("managed directory parent must be canonical and not a symlink")
+        if not stat.S_ISDIR(parent_lstat.st_mode) or parent_lstat.st_uid != uid:
+            raise NativeStateError("managed directory parent must be owned by the current user")
+        if parent_lstat.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise NativeStateError("managed directory parent must not be group/world-writable")
+        if parent_lstat.st_mode & stat.S_IWUSR == 0 or parent_lstat.st_mode & stat.S_IXUSR == 0:
+            raise NativeStateError("managed directory parent must be writable and searchable")
+        if parent != desktop:
+            raise NativeStateError(
+                "managed directory must be a direct single-leaf child of the user's Desktop"
+            )
+        if target != parent / target.name:
+            raise NativeStateError("managed directory target must use its canonical parent")
+
+        try:
+            target_lstat = target.lstat()
+        except FileNotFoundError:
+            target_lstat = None
+        except OSError as exc:
+            raise NativeStateError(f"cannot inspect managed directory target: {exc}") from exc
+        if require_missing and target_lstat is not None:
+            if stat.S_ISLNK(target_lstat.st_mode):
+                kind = "symlink"
+            elif stat.S_ISDIR(target_lstat.st_mode):
+                kind = "existing directory"
+            else:
+                kind = "non-directory filesystem entry"
+            raise NativeStateError(f"managed directory target collides with a {kind}")
+
+        return _PreparedManagedDirectory(
+            intent=intent,
+            parent=parent,
+            name=target.name,
+            parent_device=parent_lstat.st_dev,
+            parent_inode=parent_lstat.st_ino,
+        )
+
+    @staticmethod
+    def _directory_open_flags() -> int:
+        return (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+
+    def _create_managed_directory(
+        self,
+        prepared: _PreparedManagedDirectory,
+    ) -> _VerifiedManagedDirectory:
+        parent_fd = os.open(prepared.parent, self._directory_open_flags())
+        try:
+            opened_parent = os.fstat(parent_fd)
+            if (
+                opened_parent.st_dev != prepared.parent_device
+                or opened_parent.st_ino != prepared.parent_inode
+            ):
+                raise NativeStateError("managed directory parent changed before creation")
+            try:
+                os.mkdir(prepared.name, prepared.intent.mode, dir_fd=parent_fd)
+            except FileExistsError as exc:
+                raise NativeStateError(
+                    "managed directory target appeared before creation; no directory was claimed"
+                ) from exc
+
+            created_stat = os.stat(prepared.name, dir_fd=parent_fd, follow_symlinks=False)
+            if not stat.S_ISDIR(created_stat.st_mode) or created_stat.st_uid != os.geteuid():
+                raise NativeStateError("created managed directory failed ownership validation")
+            child_fd = os.open(prepared.name, self._directory_open_flags(), dir_fd=parent_fd)
+            try:
+                opened_child = os.fstat(child_fd)
+                if (
+                    opened_child.st_dev != created_stat.st_dev
+                    or opened_child.st_ino != created_stat.st_ino
+                ):
+                    raise NativeStateError("managed directory changed during creation")
+                os.fchmod(child_fd, prepared.intent.mode)
+                opened_child = os.fstat(child_fd)
+                if stat.S_IMODE(opened_child.st_mode) != prepared.intent.mode:
+                    raise NativeStateError("created managed directory mode is not 0700")
+                if os.listdir(child_fd):
+                    raise NativeStateError("created managed directory is not empty")
+                os.fsync(child_fd)
+            finally:
+                os.close(child_fd)
+            os.fsync(parent_fd)
+            return _VerifiedManagedDirectory(
+                intent=prepared.intent,
+                device=created_stat.st_dev,
+                inode=created_stat.st_ino,
+                mode=prepared.intent.mode,
+                require_empty=True,
+                require_private_mode=True,
+            )
+        finally:
+            os.close(parent_fd)
+
+    def _verify_existing_directory(
+        self,
+        intent: ManagedDirectoryIntent,
+        *,
+        require_empty: bool,
+    ) -> _VerifiedManagedDirectory:
+        prepared = self._prepare_managed_directory(intent, require_missing=False)
+        try:
+            target_lstat = intent.path.lstat()
+            resolved = intent.path.resolve(strict=True)
+        except OSError as exc:
+            raise NativeStateError(f"existing unlinked Project root is unavailable: {exc}") from exc
+        if stat.S_ISLNK(target_lstat.st_mode) or resolved != intent.path:
+            raise NativeStateError("existing unlinked Project root must not be a symlink")
+        if not stat.S_ISDIR(target_lstat.st_mode):
+            raise NativeStateError("existing unlinked Project root is not a directory")
+        if target_lstat.st_uid != os.geteuid():
+            raise NativeStateError("existing unlinked Project root is not owned by the current user")
+        target_mode = stat.S_IMODE(target_lstat.st_mode)
+        if target_lstat.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise NativeStateError(
+                "existing unlinked Project root must not be group/world-writable"
+            )
+        if target_lstat.st_mode & stat.S_IWUSR == 0 or target_lstat.st_mode & stat.S_IXUSR == 0:
+            raise NativeStateError("existing unlinked Project root is not writable and searchable")
+
+        parent_fd = os.open(prepared.parent, self._directory_open_flags())
+        try:
+            parent_stat = os.fstat(parent_fd)
+            if (
+                parent_stat.st_dev != prepared.parent_device
+                or parent_stat.st_ino != prepared.parent_inode
+            ):
+                raise NativeStateError("unlinked Project root parent changed during verification")
+            child_stat = os.stat(prepared.name, dir_fd=parent_fd, follow_symlinks=False)
+            if (
+                not stat.S_ISDIR(child_stat.st_mode)
+                or child_stat.st_dev != target_lstat.st_dev
+                or child_stat.st_ino != target_lstat.st_ino
+            ):
+                raise NativeStateError("unlinked Project root changed during verification")
+            child_fd = os.open(prepared.name, self._directory_open_flags(), dir_fd=parent_fd)
+            try:
+                opened = os.fstat(child_fd)
+                if opened.st_dev != target_lstat.st_dev or opened.st_ino != target_lstat.st_ino:
+                    raise NativeStateError("unlinked Project root changed while opening")
+                if require_empty and os.listdir(child_fd):
+                    raise NativeStateError(
+                        "existing unlinked Project root must remain empty before "
+                        "first native fallback creation"
+                    )
+            finally:
+                os.close(child_fd)
+        finally:
+            os.close(parent_fd)
+        return _VerifiedManagedDirectory(
+            intent=intent,
+            device=target_lstat.st_dev,
+            inode=target_lstat.st_ino,
+            mode=target_mode,
+            require_empty=require_empty,
+            require_private_mode=False,
+        )
+
+    def _reverify_managed_directory(self, verified: _VerifiedManagedDirectory) -> None:
+        prepared = self._prepare_managed_directory(verified.intent, require_missing=False)
+        parent_fd = os.open(prepared.parent, self._directory_open_flags())
+        try:
+            current = os.stat(prepared.name, dir_fd=parent_fd, follow_symlinks=False)
+            if (
+                not stat.S_ISDIR(current.st_mode)
+                or current.st_dev != verified.device
+                or current.st_ino != verified.inode
+                or current.st_uid != os.geteuid()
+                or stat.S_IMODE(current.st_mode) != verified.mode
+            ):
+                raise NativeStateError("unlinked Project root identity, owner, or mode changed")
+            if current.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                raise NativeStateError("unlinked Project root became group/world-writable")
+            if verified.require_private_mode and verified.mode != verified.intent.mode:
+                raise NativeStateError("created managed directory mode is not 0700")
+            child_fd = os.open(prepared.name, self._directory_open_flags(), dir_fd=parent_fd)
+            try:
+                opened = os.fstat(child_fd)
+                if opened.st_dev != verified.device or opened.st_ino != verified.inode:
+                    raise NativeStateError("unlinked Project root changed while opening")
+                if verified.require_empty and os.listdir(child_fd):
+                    raise NativeStateError(
+                        "unlinked Project root must remain empty before native fallback commit"
+                    )
+            finally:
+                os.close(child_fd)
+        finally:
+            os.close(parent_fd)
 
     def _write_mutation_journal(self, backup: Path, plan: ImportPlan) -> None:
         changes = []
@@ -633,6 +1060,8 @@ class NativeStateStore:
         app_version: str | None = None,
     ) -> Path:
         with self._lock():
+            intents = _managed_directory_intents(plan)
+            unlinked_root_intent = _unlinked_project_root_intent(plan, intents)
             compatibility, current, current_backup = self._guard_apply(
                 allow_untested=allow_untested,
                 app_version=app_version,
@@ -653,6 +1082,25 @@ class NativeStateStore:
                 raise NativeStateError(
                     "planned native state is invalid: " + "; ".join(after_errors)
                 )
+            existing_native_link = (
+                _has_existing_native_unlinked_project(plan, unlinked_root_intent)
+                if unlinked_root_intent is not None
+                else False
+            )
+            prepared_directories = [
+                self._prepare_managed_directory(intent, require_missing=True)
+                for intent in intents
+            ]
+            verified_existing_directories = (
+                [
+                    self._verify_existing_directory(
+                        unlinked_root_intent,
+                        require_empty=not existing_native_link,
+                    )
+                ]
+                if unlinked_root_intent is not None and not intents
+                else []
+            )
             backup = self._create_backup(
                 current,
                 current_backup,
@@ -662,12 +1110,23 @@ class NativeStateStore:
                     "app_version": compatibility.app_version,
                     "plan_summary": plan.manifest.get("summary", {}),
                     "after_sha256": plan.after_sha256,
+                    "managed_directories": [intent.to_manifest() for intent in intents],
                 },
             )
             self._write_mutation_journal(backup, plan)
-            self._assert_unchanged(current, current_backup)
+            verified_directories = list(verified_existing_directories)
+            native_write_started = False
             try:
+                for prepared in prepared_directories:
+                    verified_directories.append(self._create_managed_directory(prepared))
+
+                # This second CAS happens after the outside-Codex mutation but
+                # before either native copy is committed.
+                self._assert_unchanged(current, current_backup)
+                for verified_directory in verified_directories:
+                    self._reverify_managed_directory(verified_directory)
                 backup_metadata = current_backup or current
+                native_write_started = True
                 _atomic_write(
                     self.state_backup_file,
                     payload,
@@ -689,11 +1148,22 @@ class NativeStateStore:
                     or verified_backup.sha256 != plan.after_sha256
                 ):
                     raise NativeStateError("post-write hash verification failed")
+                # The native Project must never be committed if its root was
+                # swapped, loosened, or populated during the two atomic writes.
+                # On failure the native pair is restored, while the directory
+                # and any content are deliberately preserved.
+                for verified_directory in verified_directories:
+                    self._reverify_managed_directory(verified_directory)
             # KeyboardInterrupt/SystemExit are BaseException subclasses. They
             # must restore the pair too; otherwise Ctrl+C between the two
             # renames can leave main and .bak on different generations.
-            except BaseException:
-                self._restore_exact_pair(current, current_backup)
+            except BaseException as exc:
+                if native_write_started:
+                    try:
+                        self._restore_exact_pair(current, current_backup)
+                    except BaseException as restore_exc:
+                        if hasattr(exc, "add_note"):
+                            exc.add_note(f"native pair restoration also failed: {restore_exc}")
                 raise
             return backup
 

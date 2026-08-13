@@ -12,6 +12,7 @@ from unittest import mock
 
 from codex_repo_import import native_state
 from codex_repo_import.native_state import (
+    MANAGED_DIRECTORY_KIND,
     NativeStateError,
     NativeStateStore,
     classify_compatibility,
@@ -19,7 +20,7 @@ from codex_repo_import.native_state import (
     load_snapshot,
     validate_native_state,
 )
-from codex_repo_import.planner import build_import_plan, encode_state
+from codex_repo_import.planner import UNLINKED_PROJECT_NAME, build_import_plan, encode_state
 
 from tests.helpers import cloned_state, group, session
 
@@ -54,6 +55,11 @@ class StoreHarness(unittest.TestCase):
         self.backup_root = self.root / "tool-backups"
         self.proc_root = self.root / "proc"
         self.proc_root.mkdir()
+        self.home = self.root / "home"
+        self.desktop = self.home / "Desktop"
+        self.desktop.mkdir(parents=True)
+        os.chmod(self.home, 0o700)
+        os.chmod(self.desktop, 0o700)
         # Planner tests deliberately include an inconsistent assignment to
         # exercise conflict repair. NativeStateStore starts from a state that
         # already satisfies the stricter on-disk referential invariants.
@@ -67,6 +73,7 @@ class StoreHarness(unittest.TestCase):
             self.state_file,
             backup_root=self.backup_root,
             proc_root=self.proc_root,
+            home=self.home,
         )
 
     def build_plan(self, *, root: str = "/workspace/new", thread_id: str = "thread-new"):
@@ -87,6 +94,27 @@ class StoreHarness(unittest.TestCase):
         self.state_file.write_bytes(payload)
         if sync_backup:
             self.backup_file.write_bytes(payload)
+
+    def build_managed_plan(self, *, name: str = UNLINKED_PROJECT_NAME):
+        target = self.desktop / name
+        missing_root = "/old/missing-unlinked-workspace"
+        candidate = group(
+            missing_root,
+            [session("thread-unlinked", "2026-08-10T10:00:00Z", missing_root)],
+            eligible=False,
+            kind="missing",
+            reason="directory does not exist",
+        )
+        snapshot = self.store.snapshot()
+        plan = build_import_plan(
+            [candidate],
+            snapshot.state,
+            before_sha256=snapshot.sha256,
+            as_of=AS_OF,
+            timezone_name="Europe/Istanbul",
+            unlinked_project_root=str(target),
+        )
+        return plan, target
 
 
 class ValidationAndCompatibilityTests(unittest.TestCase):
@@ -323,8 +351,458 @@ class ApplyTests(StoreHarness):
         self.assertEqual(self.state_file.read_bytes(), self.initial_payload)
         self.assertEqual(self.backup_file.read_bytes(), self.initial_payload)
 
+    def test_managed_directory_plan_is_read_only_and_apply_creates_empty_private_folder(self) -> None:
+        plan, target = self.build_managed_plan()
+        self.assertFalse(target.exists(), "building a plan must not create the fallback directory")
+
+        backup = self.store.apply(plan, app_version=TESTED_VERSION)
+
+        self.assertTrue(target.is_dir())
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o700)
+        self.assertEqual(list(target.iterdir()), [])
+        self.assertFalse((backup / "external-actions.json").exists())
+        self.assertFalse((backup / "external-cleanup.json").exists())
+        projects = plan.after_state["local-projects"]
+        linked = [
+            project
+            for project in projects.values()
+            if project.get("rootPaths") == [str(target)]
+        ]
+        self.assertEqual(len(linked), 1)
+        self.assertEqual(linked[0]["name"], UNLINKED_PROJECT_NAME)
+
+    def test_managed_directory_second_cas_race_preserves_folder_and_external_state(self) -> None:
+        plan, target = self.build_managed_plan()
+        original_create_backup = self.store._create_backup
+
+        def create_backup_then_race(snapshot, state_backup_snapshot, *, kind, details=None):
+            backup = original_create_backup(
+                snapshot,
+                state_backup_snapshot,
+                kind=kind,
+                details=details,
+            )
+            raced = deepcopy(snapshot.state)
+            raced["external-race"] = "must-survive"
+            self.write_current(raced)
+            return backup
+
+        with mock.patch.object(
+            self.store,
+            "_create_backup",
+            side_effect=create_backup_then_race,
+        ):
+            with self.assertRaisesRegex(NativeStateError, "changed|race"):
+                self.store.apply(plan, app_version=TESTED_VERSION)
+
+        self.assertTrue(target.is_dir())
+        self.assertEqual(list(target.iterdir()), [])
+        self.assertEqual(self.store.snapshot().state["external-race"], "must-survive")
+
+    def test_managed_directory_native_write_failure_restores_state_and_preserves_folder(self) -> None:
+        plan, target = self.build_managed_plan()
+        real_atomic_write = native_state._atomic_write
+        failed = False
+
+        def fail_once_on_main(path, payload, mode=None, uid=None, gid=None):
+            nonlocal failed
+            if Path(path) == self.state_file and not failed:
+                failed = True
+                raise OSError("synthetic managed commit failure")
+            return real_atomic_write(path, payload, mode, uid, gid)
+
+        with mock.patch.object(native_state, "_atomic_write", side_effect=fail_once_on_main):
+            with self.assertRaisesRegex(OSError, "synthetic managed commit failure"):
+                self.store.apply(plan, app_version=TESTED_VERSION)
+
+        self.assertTrue(target.is_dir())
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o700)
+        self.assertEqual(list(target.iterdir()), [])
+        self.assertEqual(self.state_file.read_bytes(), self.initial_payload)
+        self.assertEqual(self.backup_file.read_bytes(), self.initial_payload)
+
+    def test_crash_after_mkdir_preserves_folder_and_fresh_plan_adopts_it(self) -> None:
+        plan, target = self.build_managed_plan()
+
+        def crash_after_mkdir(expected_main, expected_backup):
+            self.assertTrue(target.is_dir())
+            raise KeyboardInterrupt
+
+        with mock.patch.object(self.store, "_assert_unchanged", side_effect=crash_after_mkdir):
+            with self.assertRaises(KeyboardInterrupt):
+                self.store.apply(plan, app_version=TESTED_VERSION)
+
+        self.assertTrue(target.is_dir())
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o700)
+        self.assertEqual(list(target.iterdir()), [])
+        self.assertEqual(self.state_file.read_bytes(), self.initial_payload)
+        self.assertEqual(self.backup_file.read_bytes(), self.initial_payload)
+
+        fresh_plan, fresh_target = self.build_managed_plan()
+        self.assertEqual(fresh_target, target)
+        self.assertEqual(
+            fresh_plan.manifest["external_changes"]["managed_directories"],
+            [],
+        )
+        self.store.apply(fresh_plan, app_version=TESTED_VERSION)
+        self.assertEqual(self.store.snapshot().state, fresh_plan.after_state)
+        self.assertTrue(target.is_dir())
+
+    def test_managed_directory_keyboard_interrupt_restores_and_preserves_folder(self) -> None:
+        plan, target = self.build_managed_plan()
+        real_atomic_write = native_state._atomic_write
+        interrupted = False
+
+        def interrupt_once_on_main(path, payload, mode=None, uid=None, gid=None):
+            nonlocal interrupted
+            if Path(path) == self.state_file and not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt
+            return real_atomic_write(path, payload, mode, uid, gid)
+
+        with mock.patch.object(native_state, "_atomic_write", side_effect=interrupt_once_on_main):
+            with self.assertRaises(KeyboardInterrupt):
+                self.store.apply(plan, app_version=TESTED_VERSION)
+
+        self.assertTrue(target.is_dir())
+        self.assertEqual(list(target.iterdir()), [])
+        self.assertEqual(self.state_file.read_bytes(), self.initial_payload)
+        self.assertEqual(self.backup_file.read_bytes(), self.initial_payload)
+
+    def test_stale_creation_plan_rejects_directory_file_and_symlink_collisions(self) -> None:
+        for collision_kind in ("directory", "file", "symlink"):
+            with self.subTest(collision_kind=collision_kind):
+                plan, target = self.build_managed_plan(name=f"collision-{collision_kind}")
+                if collision_kind == "directory":
+                    target.mkdir()
+                elif collision_kind == "file":
+                    target.write_text("user-owned", encoding="utf-8")
+                else:
+                    destination = self.desktop / "foreign-directory"
+                    destination.mkdir(exist_ok=True)
+                    target.symlink_to(destination, target_is_directory=True)
+
+                with self.assertRaisesRegex(NativeStateError, "collides"):
+                    self.store.apply(plan, app_version=TESTED_VERSION)
+
+                self.assertTrue(target.exists())
+                self.assertEqual(self.store.backups(), [])
+
+    def test_preexisting_directory_symlink_swap_before_commit_is_rejected(self) -> None:
+        plan, target = self.build_managed_plan()
+        target.mkdir(mode=0o700)
+        plan, _ = self.build_managed_plan()
+        saved = self.desktop / "saved-user-directory"
+        original_assert = self.store._assert_unchanged
+
+        def assert_then_swap(expected_main, expected_backup):
+            original_assert(expected_main, expected_backup)
+            target.rename(saved)
+            target.symlink_to(saved, target_is_directory=True)
+
+        with mock.patch.object(
+            self.store,
+            "_assert_unchanged",
+            side_effect=assert_then_swap,
+        ):
+            with self.assertRaisesRegex(NativeStateError, "symlink|changed"):
+                self.store.apply(plan, app_version=TESTED_VERSION)
+
+        self.assertTrue(target.is_symlink())
+        self.assertTrue(saved.is_dir())
+        self.assertEqual(self.state_file.read_bytes(), self.initial_payload)
+
+    def test_first_fallback_rejects_a_preexisting_nonempty_directory(self) -> None:
+        plan, target = self.build_managed_plan()
+        target.mkdir(mode=0o700)
+        user_file = target / "user-file.txt"
+        user_file.write_text("keep", encoding="utf-8")
+        plan, _ = self.build_managed_plan()
+
+        with self.assertRaisesRegex(NativeStateError, "must remain empty"):
+            self.store.apply(plan, app_version=TESTED_VERSION)
+
+        self.assertEqual(user_file.read_text(encoding="utf-8"), "keep")
+        self.assertTrue(target.is_dir())
+        self.assertEqual(self.store.backups(), [])
+        self.assertEqual(self.state_file.read_bytes(), self.initial_payload)
+        self.assertEqual(self.backup_file.read_bytes(), self.initial_payload)
+
+    def test_first_fallback_rechecks_preexisting_directory_emptiness_before_commit(self) -> None:
+        plan, target = self.build_managed_plan()
+        target.mkdir(mode=0o700)
+        plan, _ = self.build_managed_plan()
+        user_file = target / "raced-user-file.txt"
+        original_assert = self.store._assert_unchanged
+
+        def assert_then_add_user_file(expected_main, expected_backup):
+            original_assert(expected_main, expected_backup)
+            user_file.write_text("keep", encoding="utf-8")
+
+        with mock.patch.object(
+            self.store,
+            "_assert_unchanged",
+            side_effect=assert_then_add_user_file,
+        ):
+            with self.assertRaisesRegex(NativeStateError, "must remain empty"):
+                self.store.apply(plan, app_version=TESTED_VERSION)
+
+        self.assertEqual(user_file.read_text(encoding="utf-8"), "keep")
+        self.assertTrue(target.is_dir())
+        self.assertEqual(len(self.store.backups()), 1)
+        self.assertEqual(self.state_file.read_bytes(), self.initial_payload)
+        self.assertEqual(self.backup_file.read_bytes(), self.initial_payload)
+
+    def test_existing_native_unlinked_project_allows_nonempty_root(self) -> None:
+        target = self.desktop / UNLINKED_PROJECT_NAME
+        target.mkdir(mode=0o700)
+        user_file = target / "existing-content.txt"
+        user_file.write_text("keep", encoding="utf-8")
+        existing_project_id = "existing-unlinked-project"
+        current = deepcopy(self.initial_state)
+        current["local-projects"][existing_project_id] = {
+            "id": existing_project_id,
+            "name": UNLINKED_PROJECT_NAME,
+            "rootPaths": [str(target)],
+            "createdAt": 100,
+            "updatedAt": 200,
+        }
+        current["project-order"].append(existing_project_id)
+        current["sidebar-project-thread-orders"][existing_project_id] = {
+            "threadIds": [],
+        }
+        self.write_current(current, sync_backup=True)
+        plan, planned_target = self.build_managed_plan()
+        self.assertEqual(planned_target, target)
+
+        backup = self.store.apply(plan, app_version=TESTED_VERSION)
+
+        self.assertEqual(user_file.read_text(encoding="utf-8"), "keep")
+        self.assertTrue(target.is_dir())
+        self.assertFalse((backup / "external-actions.json").exists())
+
+    def test_post_commit_content_race_restores_native_and_preserves_content(self) -> None:
+        plan, target = self.build_managed_plan()
+        original_reverify = self.store._reverify_managed_directory
+        calls = 0
+
+        def add_content_on_post_write(verified):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                (target / "keep.txt").write_text("do not delete", encoding="utf-8")
+            return original_reverify(verified)
+
+        with mock.patch.object(
+            self.store,
+            "_reverify_managed_directory",
+            side_effect=add_content_on_post_write,
+        ):
+            with self.assertRaisesRegex(NativeStateError, "must remain empty"):
+                self.store.apply(plan, app_version=TESTED_VERSION)
+
+        self.assertEqual((target / "keep.txt").read_text(encoding="utf-8"), "do not delete")
+        self.assertEqual(self.state_file.read_bytes(), self.initial_payload)
+        self.assertEqual(self.backup_file.read_bytes(), self.initial_payload)
+
+    def test_post_commit_directory_swap_restores_native_and_preserves_both_directories(self) -> None:
+        plan, target = self.build_managed_plan()
+        original_reverify = self.store._reverify_managed_directory
+        saved = self.desktop / "preserved-original-fallback"
+        calls = 0
+
+        def swap_on_post_write(verified):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                target.rename(saved)
+                target.mkdir(mode=0o700)
+            return original_reverify(verified)
+
+        with mock.patch.object(
+            self.store,
+            "_reverify_managed_directory",
+            side_effect=swap_on_post_write,
+        ):
+            with self.assertRaisesRegex(NativeStateError, "identity|changed"):
+                self.store.apply(plan, app_version=TESTED_VERSION)
+
+        self.assertTrue(saved.is_dir())
+        self.assertTrue(target.is_dir())
+        self.assertEqual(self.state_file.read_bytes(), self.initial_payload)
+        self.assertEqual(self.backup_file.read_bytes(), self.initial_payload)
+
+    def test_managed_directory_rejects_group_or_world_writable_boundaries(self) -> None:
+        cases = ("home", "desktop", "target")
+        for case in cases:
+            with self.subTest(case=case):
+                plan, target = self.build_managed_plan(name=f"unsafe-{case}")
+                changed_path = self.home if case == "home" else self.desktop
+                if case == "target":
+                    target.mkdir(mode=0o700)
+                    plan, _ = self.build_managed_plan(name=f"unsafe-{case}")
+                    changed_path = target
+                original_mode = stat.S_IMODE(changed_path.stat().st_mode)
+                os.chmod(changed_path, original_mode | stat.S_IWGRP)
+                try:
+                    with self.assertRaisesRegex(NativeStateError, "group/world-writable"):
+                        self.store.apply(plan, app_version=TESTED_VERSION)
+                finally:
+                    os.chmod(changed_path, original_mode)
+                self.assertEqual(self.store.backups(), [])
+
+    def test_managed_directory_manifest_parser_is_strict(self) -> None:
+        mutations = (
+            lambda entries: entries.append(deepcopy(entries[0])),
+            lambda entries: entries[0].update({"extra": True}),
+            lambda entries: entries[0].update({"mode": "0755"}),
+            lambda entries: entries[0].update({"kind": "arbitrary-operation"}),
+        )
+        for mutate in mutations:
+            with self.subTest(mutation=mutate):
+                plan, target = self.build_managed_plan()
+                entries = plan.manifest["external_changes"]["managed_directories"]
+                mutate(entries)
+                with self.assertRaises(NativeStateError):
+                    self.store.apply(plan, app_version=TESTED_VERSION)
+                self.assertFalse(target.exists())
+                self.assertEqual(self.store.backups(), [])
+
+    def test_managed_directory_must_match_option_and_exact_fallback_link(self) -> None:
+        plan, target = self.build_managed_plan()
+        other = self.desktop / "Other Fallback"
+        plan.manifest["external_changes"]["managed_directories"][0]["path"] = str(other)
+        with self.assertRaisesRegex(NativeStateError, "does not match"):
+            self.store.apply(plan, app_version=TESTED_VERSION)
+        self.assertFalse(target.exists())
+        self.assertFalse(other.exists())
+
+    def test_multi_root_duplicate_and_casefold_fallback_linkages_are_rejected(self) -> None:
+        for invalid_kind in (
+            "multi-root",
+            "duplicate",
+            "casefold-collision",
+            "normalized-alias",
+        ):
+            with self.subTest(invalid_kind=invalid_kind):
+                plan, target = self.build_managed_plan()
+                projects = plan.after_state["local-projects"]
+                project_id = next(
+                    project_id
+                    for project_id, project in projects.items()
+                    if project.get("rootPaths") == [str(target)]
+                )
+                if invalid_kind == "multi-root":
+                    projects[project_id]["rootPaths"].append(str(self.desktop / "Other"))
+                elif invalid_kind == "duplicate":
+                    duplicate = deepcopy(projects[project_id])
+                    duplicate["id"] = "duplicate-fallback-project"
+                    projects[duplicate["id"]] = duplicate
+                else:
+                    alias_id = f"{invalid_kind}-fallback-project"
+                    projects[alias_id] = {
+                        "id": alias_id,
+                        "name": (
+                            UNLINKED_PROJECT_NAME.lower()
+                            if invalid_kind == "casefold-collision"
+                            else "Ordinary Project"
+                        ),
+                        "rootPaths": [
+                            str(self.desktop / "Other")
+                            if invalid_kind == "casefold-collision"
+                            else f"{self.desktop}/detour/../{target.name}"
+                        ],
+                        "createdAt": 100,
+                        "updatedAt": 200,
+                    }
+                plan.after_sha256 = native_state.sha256_bytes(encode_state(plan.after_state))
+                with self.assertRaisesRegex(NativeStateError, "exactly one|duplicate|fixed name"):
+                    self.store.apply(plan, app_version=TESTED_VERSION)
+                self.assertFalse(target.exists())
+
+    def test_managed_directory_creation_is_refused_for_root(self) -> None:
+        plan, target = self.build_managed_plan()
+        with mock.patch.object(native_state.os, "geteuid", return_value=0):
+            with self.assertRaisesRegex(NativeStateError, "refused for root"):
+                self.store.apply(plan, app_version=TESTED_VERSION)
+        self.assertFalse(target.exists())
+        self.assertEqual(self.store.backups(), [])
+
 
 class RollbackTests(StoreHarness):
+    def test_managed_directory_rollback_restores_native_state_and_preserves_folder(self) -> None:
+        plan, target = self.build_managed_plan()
+        backup = self.store.apply(plan, app_version=TESTED_VERSION)
+        self.assertTrue(target.is_dir())
+
+        _, safety = self.store.rollback(backup.name, app_version=TESTED_VERSION)
+
+        self.assertEqual(self.state_file.read_bytes(), self.initial_payload)
+        self.assertEqual(self.backup_file.read_bytes(), self.initial_payload)
+        self.assertTrue(target.is_dir())
+        self.assertEqual(list(target.iterdir()), [])
+        self.assertFalse((safety / "external-cleanup.json").exists())
+
+    def test_managed_directory_rollback_conflict_preserves_directory(self) -> None:
+        plan, target = self.build_managed_plan()
+        backup = self.store.apply(plan, app_version=TESTED_VERSION)
+        changed = self.store.snapshot().state
+        changed["project-order"] = list(reversed(changed["project-order"]))
+        self.write_current(changed, sync_backup=True)
+
+        with self.assertRaisesRegex(NativeStateError, "importer-owned keys"):
+            self.store.rollback(backup.name, app_version=TESTED_VERSION)
+
+        self.assertTrue(target.is_dir())
+
+    def test_managed_directory_rollback_preserves_user_content_after_native_restore(self) -> None:
+        plan, target = self.build_managed_plan()
+        backup = self.store.apply(plan, app_version=TESTED_VERSION)
+        (target / "keep.txt").write_text("user data", encoding="utf-8")
+
+        _, safety = self.store.rollback(backup.name, app_version=TESTED_VERSION)
+
+        self.assertEqual(self.state_file.read_bytes(), self.initial_payload)
+        self.assertEqual((target / "keep.txt").read_text(encoding="utf-8"), "user data")
+        self.assertTrue(target.is_dir())
+        self.assertFalse((safety / "external-cleanup.json").exists())
+
+    def test_managed_directory_is_not_removed_when_native_rollback_fails(self) -> None:
+        plan, target = self.build_managed_plan()
+        backup = self.store.apply(plan, app_version=TESTED_VERSION)
+        applied_payload = self.state_file.read_bytes()
+        real_atomic_write = native_state._atomic_write
+        failed = False
+
+        def fail_once_on_main(path, payload, mode=None, uid=None, gid=None):
+            nonlocal failed
+            if Path(path) == self.state_file and not failed:
+                failed = True
+                raise OSError("synthetic managed rollback failure")
+            return real_atomic_write(path, payload, mode, uid, gid)
+
+        with mock.patch.object(native_state, "_atomic_write", side_effect=fail_once_on_main):
+            with self.assertRaisesRegex(OSError, "synthetic managed rollback failure"):
+                self.store.rollback(backup.name, app_version=TESTED_VERSION)
+
+        self.assertEqual(self.state_file.read_bytes(), applied_payload)
+        self.assertEqual(self.backup_file.read_bytes(), applied_payload)
+        self.assertTrue(target.is_dir())
+
+    def test_preexisting_verified_directory_is_never_removed(self) -> None:
+        plan, target = self.build_managed_plan()
+        target.mkdir(mode=0o755)
+        plan, _ = self.build_managed_plan()
+
+        backup = self.store.apply(plan, app_version=TESTED_VERSION)
+        self.assertFalse((backup / "external-actions.json").exists())
+        (target / "user-file.txt").write_text("keep", encoding="utf-8")
+
+        self.store.rollback(backup.name, app_version=TESTED_VERSION)
+
+        self.assertEqual((target / "user-file.txt").read_text(encoding="utf-8"), "keep")
+        self.assertTrue(target.is_dir())
+
     def test_surgical_rollback_restores_owned_paths_and_preserves_later_external_state(self) -> None:
         plan = self.build_plan()
         backup = self.store.apply(plan, app_version=TESTED_VERSION)

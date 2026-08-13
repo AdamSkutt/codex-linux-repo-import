@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import stat
 import sys
 from typing import Any, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -21,9 +22,9 @@ from .native_state import (
     is_desktop_running,
     load_snapshot,
 )
-from .planner import ImportPlan, build_import_plan
+from .planner import ImportPlan, PlannerError, UNLINKED_PROJECT_NAME, build_import_plan
 from .ranking import DEFAULT_TIMEZONE, rank_projects
-from .roots import group_sessions, parse_path_mapping
+from .roots import git_root_for_path, group_sessions, parse_path_mapping, resolve_project_root
 from .sessions import scan_sessions
 
 
@@ -113,6 +114,167 @@ def _scan_ranked(
     return rank_projects(groups, as_of=as_of, timezone_name=timezone_name), diagnostics
 
 
+def _paths_overlap(first: Path, second: Path) -> bool:
+    return first == second or first in second.parents or second in first.parents
+
+
+def _unlinked_project_root(
+    value: str | None,
+    *,
+    layout: Layout,
+    groups: list[ProjectGroup],
+    state: dict[str, Any],
+) -> str | None:
+    if value is None:
+        return None
+    raw = Path(value).expanduser()
+    if not raw.is_absolute():
+        raise CliError("--unlinked-project-root must be an absolute path")
+    if raw.is_symlink():
+        raise CliError("--unlinked-project-root must not be a symlink")
+
+    home_path = Path.home()
+    try:
+        home = home_path.resolve(strict=True)
+    except OSError as exc:
+        raise CliError("the unlinked Project requires a real user home directory") from exc
+    if home_path != home or home_path.is_symlink():
+        raise CliError("the unlinked Project requires a canonical, non-symlink user home")
+    desktop_path = home / "Desktop"
+    try:
+        desktop = desktop_path.resolve(strict=True)
+    except OSError as exc:
+        raise CliError("the unlinked Project requires an existing ~/Desktop") from exc
+    if not desktop.is_dir() or desktop_path.is_symlink():
+        raise CliError("the unlinked Project requires a real ~/Desktop directory")
+
+    exists = raw.exists()
+    if exists:
+        if not raw.is_dir():
+            raise CliError("--unlinked-project-root must be a directory or a missing leaf")
+        try:
+            target = raw.resolve(strict=True)
+        except OSError as exc:
+            raise CliError(f"cannot resolve --unlinked-project-root: {exc}") from exc
+        resolved = resolve_project_root(str(target))
+        if resolved.kind == "git":
+            raise CliError("--unlinked-project-root must not be inside a Git repository")
+    else:
+        parent = raw.parent
+        if not parent.exists() or not parent.is_dir() or parent.is_symlink():
+            raise CliError(
+                "--unlinked-project-root may create only one missing leaf under an existing directory"
+            )
+        try:
+            target = parent.resolve(strict=True) / raw.name
+        except OSError as exc:
+            raise CliError(f"cannot resolve --unlinked-project-root parent: {exc}") from exc
+        if target.parent != desktop:
+            raise CliError(
+                "a missing --unlinked-project-root must be a direct child of ~/Desktop"
+            )
+
+    try:
+        target.relative_to(desktop)
+    except ValueError as exc:
+        raise CliError("--unlinked-project-root must be under ~/Desktop") from exc
+    if target.parent != desktop:
+        raise CliError("--unlinked-project-root must be a direct child of ~/Desktop")
+    if git_root_for_path(target.parent) is not None:
+        raise CliError("--unlinked-project-root must not be inside a Git repository")
+
+    for label, directory in (
+        ("home", home),
+        ("Desktop", desktop),
+        ("target parent", target.parent),
+    ):
+        try:
+            metadata = directory.stat()
+        except OSError as exc:
+            raise CliError(f"cannot inspect unlinked {label} directory: {exc}") from exc
+        if metadata.st_uid != os.geteuid():
+            raise CliError(f"the unlinked {label} directory must be owned by the current user")
+        if metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise CliError(f"the unlinked {label} directory must not be group/world writable")
+    if exists:
+        target_metadata = target.stat()
+        if target_metadata.st_uid != os.geteuid():
+            raise CliError("the existing unlinked target must be owned by the current user")
+        if target_metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise CliError("the existing unlinked target must not be group/world writable")
+        if (
+            target_metadata.st_mode & stat.S_IWUSR == 0
+            or target_metadata.st_mode & stat.S_IXUSR == 0
+        ):
+            raise CliError("the existing unlinked target must be writable and searchable")
+
+    codex_home = layout.codex_home.resolve(strict=False)
+    if _paths_overlap(target, codex_home):
+        raise CliError("--unlinked-project-root must not overlap the Codex data directory")
+
+    for group in groups:
+        if not group.root.eligible_for_apply:
+            continue
+        group_root = Path(group.root.root).resolve(strict=False)
+        if _paths_overlap(target, group_root):
+            raise CliError("--unlinked-project-root overlaps a resolved repository or workspace")
+
+    exact_native_fallback = False
+    fallback_named_projects = 0
+    target_owner_projects = 0
+    projects = state.get("local-projects")
+    if isinstance(projects, dict):
+        for project in projects.values():
+            if not isinstance(project, dict):
+                continue
+            name = project.get("name")
+            roots = project.get("rootPaths")
+            canonical_roots = (
+                [
+                    Path(root).expanduser().resolve(strict=False)
+                    for root in roots
+                    if isinstance(root, str)
+                ]
+                if isinstance(roots, list)
+                else []
+            )
+            fallback_name_collision = (
+                isinstance(name, str)
+                and name.casefold() == UNLINKED_PROJECT_NAME.casefold()
+            )
+            owns_target = target in canonical_roots
+            if fallback_name_collision:
+                fallback_named_projects += 1
+                if name != UNLINKED_PROJECT_NAME or canonical_roots != [target]:
+                    raise CliError(
+                        f"the native {UNLINKED_PROJECT_NAME!r} Project must use exactly this one root"
+                    )
+            if owns_target:
+                target_owner_projects += 1
+                if name != UNLINKED_PROJECT_NAME or canonical_roots != [target]:
+                    raise CliError(
+                        "--unlinked-project-root is already owned by a different native Project"
+                    )
+                exact_native_fallback = True
+            for native_root in canonical_roots:
+                if native_root == target:
+                    continue
+                if _paths_overlap(target, native_root):
+                    raise CliError("--unlinked-project-root overlaps an existing native Project")
+    if fallback_named_projects > 1 or target_owner_projects > 1:
+        raise CliError("native state contains duplicate Unlinked Codex Chats Projects")
+
+    if exists and not exact_native_fallback:
+        try:
+            if any(target.iterdir()):
+                raise CliError(
+                    "an existing --unlinked-project-root must be empty before first use"
+                )
+        except OSError as exc:
+            raise CliError(f"cannot inspect --unlinked-project-root: {exc}") from exc
+    return str(target)
+
+
 def _project_rows(groups: list[ProjectGroup]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for index, group in enumerate(groups, 1):
@@ -152,6 +314,37 @@ def _diagnostic_payload(diagnostics: list[Diagnostic]) -> list[dict[str, Any]]:
     return [item.to_dict() for item in diagnostics]
 
 
+def _print_unlinked_plan(plan: ImportPlan) -> None:
+    root = plan.manifest.get("options", {}).get("unlinked_project_root")
+    if not isinstance(root, str):
+        return
+    changes = plan.manifest.get("native_changes", {})
+    creates = changes.get("create_projects", [])
+    reuses = changes.get("reuse_projects", [])
+    if any(isinstance(item, dict) and item.get("root") == root for item in creates):
+        project_action = "create"
+    elif any(isinstance(item, dict) and item.get("root") == root for item in reuses):
+        project_action = "reuse"
+    else:
+        project_action = "none (no assignable chats)"
+
+    managed = plan.manifest.get("external_changes", {}).get("managed_directories", [])
+    if any(isinstance(item, dict) and item.get("path") == root for item in managed):
+        directory_action = "create during apply"
+    elif project_action != "none (no assignable chats)" and Path(root).is_dir():
+        directory_action = "reuse existing directory"
+    else:
+        directory_action = "none"
+
+    summary = plan.manifest["summary"]
+    print("\nUnlinked fallback")
+    print(f"  Target: {root}")
+    print(f"  Native Project: {project_action}")
+    print(f"  Directory: {directory_action}")
+    print(f"  Candidate chats: {summary['unlinked_chats_candidates']}")
+    print(f"  Accepted chats: {summary['unlinked_chats_assignable']}")
+
+
 def _load_catalog(
     layout: Layout,
     diagnostics: list[Diagnostic],
@@ -184,7 +377,17 @@ def _build_plan(
     if not groups:
         raise CliError("no VS Code Codex extension chats were found")
     snapshot = load_snapshot(layout.state_file)
-    known_ids = _load_catalog(layout, diagnostics, strict=strict_catalog)
+    unlinked_root = _unlinked_project_root(
+        args.unlinked_project_root,
+        layout=layout,
+        groups=groups,
+        state=snapshot.state,
+    )
+    known_ids = _load_catalog(
+        layout,
+        diagnostics,
+        strict=strict_catalog or unlinked_root is not None,
+    )
     plan = build_import_plan(
         groups,
         snapshot.state,
@@ -196,6 +399,7 @@ def _build_plan(
         activate_weighted_sort=not args.preserve_native_sort,
         known_thread_ids=known_ids,
         diagnostics=diagnostics,
+        unlinked_project_root=unlinked_root,
     )
     return plan, groups
 
@@ -252,6 +456,7 @@ def _command_plan(args: argparse.Namespace) -> int:
     else:
         print(f"  Threads missing from native catalog: {summary['threads_missing_from_native_catalog']}")
     print(f"  Diagnostics: {len(plan.manifest['diagnostics'])}")
+    _print_unlinked_plan(plan)
     print("\nDry-run only. No files were changed.")
     return 0
 
@@ -267,10 +472,14 @@ def _command_apply(args: argparse.Namespace) -> int:
             f"{missing_catalog} selected chats are absent from the native thread catalog; "
             "apply was stopped"
         )
-    if plan.after_sha256 == plan.before_sha256:
+    managed_directories = plan.manifest.get("external_changes", {}).get(
+        "managed_directories", []
+    )
+    if plan.after_sha256 == plan.before_sha256 and not managed_directories:
         print("No native state changes are needed.")
         return 0
     _print_projects(groups)
+    _print_unlinked_plan(plan)
     store = NativeStateStore(layout.state_file, backup_root=layout.backup_root)
     backup = store.apply(plan, allow_untested=args.allow_untested)
     summary = plan.manifest["summary"]
@@ -424,6 +633,14 @@ def _add_plan_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--include-archived", action="store_true", help="also assign archived chats")
     parser.add_argument("--reassign", action="store_true", help="move chats already assigned elsewhere")
     parser.add_argument(
+        "--unlinked-project-root",
+        metavar="PATH",
+        help=(
+            "place active chats from ambiguous or missing roots in one "
+            f"{UNLINKED_PROJECT_NAME!r} Project"
+        ),
+    )
+    parser.add_argument(
         "--preserve-native-sort",
         action="store_true",
         help="do not switch the native Projects panel to weighted manual order",
@@ -476,7 +693,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return int(args.handler(args))
-    except (CliError, NativeStateError) as exc:
+    except (CliError, NativeStateError, PlannerError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:

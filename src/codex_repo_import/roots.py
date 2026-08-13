@@ -77,6 +77,18 @@ def _git_root(path: Path) -> Path | None:
         current = current.parent
 
 
+def git_root_for_path(path: Path) -> Path | None:
+    """Return the enclosing Git root for an existing directory, if any."""
+
+    try:
+        canonical = path.resolve(strict=True)
+    except OSError:
+        return None
+    if not canonical.is_dir():
+        return None
+    return _git_root(canonical)
+
+
 def _ambiguous_roots(home: Path) -> set[str]:
     roots = {Path("/"), home, home / "Desktop", home / "Documents", home / "Downloads"}
     return {os.path.normcase(os.path.normpath(str(path))) for path in roots}
