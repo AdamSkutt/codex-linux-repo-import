@@ -41,6 +41,8 @@ electron-persisted-atom-state.unified-sidebar-project-order-v1
 
 Unknown state is preserved. The tool does not write session JSONL files, the native thread SQLite database, or Chromium storage.
 
+When `--unlinked-project-root PATH` is supplied, apply may also create one private dedicated local directory outside native state. The backup manifest records the reviewed creation intent, but the directory is never treated as deletable importer-owned state and does not broaden the native-state key allowlist above.
+
 Compatibility also requires the native local-Projects migration marker expected by the tested Desktop build. Missing required keys are initialized only where the tested schema permits it; wrong types and malformed Project records are rejected.
 
 ## Version detection and gates
@@ -61,6 +63,24 @@ Only sessions whose first metadata record exactly identifies both the Codex VS C
 
 Active and archived session trees are deduplicated by thread ID, with the active record winning. Archived sessions are reported but excluded from assignment and scoring by default.
 
+## Unlinked fallback contract
+
+The fallback is opt-in and available only to `plan` and `apply` through:
+
+```text
+--unlinked-project-root PATH
+```
+
+Omitting the flag preserves the existing behavior: ineligible groups are reported but untouched. Supplying it creates or reuses at most one local Project with the fixed native name `Unlinked Codex Chats` and the canonical target path as its single `rootPaths` entry.
+
+The fallback candidate set contains only VS Code extension sessions whose post-mapping root classification is `missing` or `ambiguous`. Eligible Git/workspace groups and `unresolved` roots remain separate and are never folded into the fallback. Archived fallback candidates are excluded by default and included only when the existing global `--include-archived` option is supplied.
+
+Native catalog membership is mandatory. A catalog-missing candidate receives no assignment, per-Project thread-order entry, or projectless-state mutation. An existing assignment is always preserved for fallback candidates; `--reassign` affects normal target Projects but cannot move a thread into `Unlinked Codex Chats`. The fallback Project is not created when every candidate is excluded as archived, catalog-missing, or already assigned elsewhere.
+
+The fallback does not participate in repository/workspace scoring. A newly created fallback is appended after weighted Projects; a reused fallback keeps its existing position. Its chats are deterministically ordered newest-first with thread ID as the tie-break, and a repeated identical plan is idempotent. Existing fallback/native ordering and unknown fields remain preserved under the same compatibility rules as normal Projects.
+
+`PATH` must be an absolute, canonicalizable, dedicated direct child of the current user's real, existing `~/Desktop`. Validation rejects path, symlink, repository, conflicting native-Project, source-root, protected Codex-data, and ancestor/descendant collisions. `plan` performs no directory mutation. `apply` creates the leaf with mode `0700` only after its write guards pass, then verifies its identity and emptiness before and after committing native state. Failures restore native state but preserve the directory. Rollback likewise never deletes it; an interruption-created empty directory is reusable by a fresh plan.
+
 ## Root resolution
 
 Workspace paths are resolved locally. Git repositories, worktrees, and submodules are grouped by their enclosing local Git root. A non-Git workspace uses its exact canonical directory.
@@ -74,6 +94,8 @@ The tool intentionally does not:
 
 These cases remain visible in the plan as ineligible rather than being silently guessed.
 
+With an explicit `--unlinked-project-root`, only the `missing` and `ambiguous` cases may instead be collected under the bounded fallback contract above. The option does not infer where a moved repository went and does not turn the fallback directory into repository authority.
+
 ## Adding compatibility for another Desktop build
 
 Another Desktop build should be marked tested only after all of the following use synthetic, non-personal fixtures:
@@ -84,5 +106,6 @@ Another Desktop build should be marked tested only after all of the following us
 4. App-running, compare-and-swap, malformed-state, and interrupted-write guards are tested.
 5. Exact rollback and later-state conflict cases pass.
 6. A clean Desktop launch renders the expected native Projects and threads.
+7. Unlinked selection, target collision checks, catalog enforcement, assignment preservation, unranked ordering, non-destructive apply failure handling, and rollback directory preservation pass.
 
 Do not submit captured native state or session data as a fixture.

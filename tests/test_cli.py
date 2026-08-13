@@ -128,6 +128,10 @@ class CliIntegrationTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
+        self.user_home = self.root / "user-home"
+        (self.user_home / "Desktop").mkdir(parents=True)
+        os.chmod(self.user_home, 0o700)
+        os.chmod(self.user_home / "Desktop", 0o700)
 
     def run_cli(self, *arguments: str, timeout: int = 15) -> subprocess.CompletedProcess[str]:
         environment = os.environ.copy()
@@ -139,6 +143,7 @@ class CliIntegrationTests(unittest.TestCase):
             else source_path + os.pathsep + current_pythonpath
         )
         environment["CODEX_DESKTOP_VERSION"] = TESTED_VERSION
+        environment["HOME"] = str(self.user_home)
         return subprocess.run(
             [sys.executable, "-m", "codex_repo_import", *arguments],
             cwd=REPOSITORY_ROOT,
@@ -233,6 +238,183 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertEqual(layout.state_backup_file.read_bytes(), backup_before)
         self.assertEqual(hashlib.sha256(layout.database.read_bytes()).hexdigest(), database_before)
         self.assertFalse((layout.home / "backups" / "codex-linux-repo-import").exists())
+
+    def test_unlinked_project_root_is_available_only_for_plan_and_apply(self) -> None:
+        for command in ("plan", "apply"):
+            result = self.run_cli(command, "--help")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("--unlinked-project-root", result.stdout)
+
+        scan_result = self.run_cli(
+            "scan",
+            "--unlinked-project-root",
+            str(self.root / "unlinked"),
+        )
+        self.assertEqual(scan_result.returncode, 2)
+        self.assertIn("unrecognized arguments: --unlinked-project-root", scan_result.stderr)
+
+    def test_unlinked_project_root_rejects_a_missing_leaf_inside_a_git_desktop(self) -> None:
+        layout = SyntheticCodexLayout(self.root, with_sessions=True)
+        git_marker = self.user_home / "Desktop" / ".git"
+        git_marker.mkdir()
+        (git_marker / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+
+        result = self.run_cli(
+            "plan",
+            "--codex-home",
+            str(layout.home),
+            "--unlinked-project-root",
+            str(self.user_home / "Desktop" / "Unlinked Codex Chats"),
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("must not be inside a Git repository", result.stderr)
+        self.assertFalse((self.user_home / "Desktop" / "Unlinked Codex Chats").exists())
+
+    def test_unlinked_project_root_rejects_multi_root_and_duplicate_native_owners(self) -> None:
+        for shape in ("multi-root", "duplicate"):
+            with self.subTest(shape=shape):
+                case_root = self.root / shape
+                case_root.mkdir()
+                layout = SyntheticCodexLayout(case_root, with_sessions=True)
+                target = self.user_home / "Desktop" / shape
+                target.mkdir(mode=0o700)
+                os.chmod(target, 0o700)
+                state = json.loads(layout.state_file.read_text(encoding="utf-8"))
+                state["local-projects"]["fallback-one"] = {
+                    "id": "fallback-one",
+                    "name": "Unlinked Codex Chats",
+                    "rootPaths": (
+                        [str(target), str(self.user_home / "Desktop" / "other")]
+                        if shape == "multi-root"
+                        else [str(target)]
+                    ),
+                    "createdAt": 1,
+                    "updatedAt": 1,
+                }
+                if shape == "duplicate":
+                    state["local-projects"]["fallback-two"] = {
+                        **state["local-projects"]["fallback-one"],
+                        "id": "fallback-two",
+                    }
+                payload = json.dumps(state, separators=(",", ":")).encode("utf-8")
+                layout.state_file.write_bytes(payload)
+                layout.state_backup_file.write_bytes(payload)
+
+                result = self.run_cli(
+                    "plan",
+                    "--codex-home",
+                    str(layout.home),
+                    "--unlinked-project-root",
+                    str(target),
+                )
+
+                self.assertEqual(result.returncode, 2)
+                self.assertRegex(result.stderr, "exactly this one root|duplicate")
+
+    def test_plan_json_opt_in_groups_a_missing_session_into_one_unlinked_project(self) -> None:
+        layout = SyntheticCodexLayout(self.root, with_sessions=True)
+        missing_id = "thread-missing-root"
+        missing_root = self.root / "moved-project"
+        unlinked_root = self.user_home / "Desktop" / "unlinked-codex-chats"
+
+        state = json.loads(layout.state_file.read_text(encoding="utf-8"))
+        state["projectless-thread-ids"].append(missing_id)
+        state_payload = json.dumps(
+            state,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        layout.state_file.write_bytes(state_payload)
+        layout.state_backup_file.write_bytes(state_payload)
+        connection = sqlite3.connect(layout.database)
+        try:
+            connection.execute("INSERT INTO threads (id) VALUES (?)", (missing_id,))
+            connection.commit()
+        finally:
+            connection.close()
+        _write_rollout(
+            layout.sessions / "2026" / "08",
+            filename="rollout-missing.jsonl",
+            thread_id=missing_id,
+            timestamp="2026-08-11T10:00:00Z",
+            cwd=missing_root,
+        )
+
+        state_before = layout.state_file.read_bytes()
+        result = self.run_cli(
+            "plan",
+            "--codex-home",
+            str(layout.home),
+            "--timezone",
+            "UTC",
+            "--as-of",
+            "2026-08-12T12:00:00Z",
+            "--unlinked-project-root",
+            str(unlinked_root),
+            "--json",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        manifest = json.loads(result.stdout)
+        self.assertEqual(
+            manifest["options"]["unlinked_project_root"],
+            str(unlinked_root.resolve()),
+        )
+        unlinked_creations = [
+            item
+            for item in manifest["native_changes"]["create_projects"]
+            if item["root"] == str(unlinked_root.resolve())
+        ]
+        self.assertEqual(len(unlinked_creations), 1)
+        self.assertEqual(unlinked_creations[0]["name"], "Unlinked Codex Chats")
+        self.assertEqual(
+            [
+                item["thread_id"]
+                for item in manifest["native_changes"]["assignment_updates"]
+                if item["project_id"] == unlinked_creations[0]["project_id"]
+            ],
+            [missing_id],
+        )
+        self.assertEqual(
+            manifest["external_changes"]["managed_directories"],
+            [
+                {
+                    "kind": "create_unlinked_project_root",
+                    "path": str(unlinked_root),
+                    "mode": "0700",
+                }
+            ],
+        )
+        source_group = next(
+            item for item in manifest["projects"] if item["root"] == str(missing_root)
+        )
+        self.assertFalse(source_group["eligible_for_apply"])
+        self.assertEqual(source_group["root_kind"], "missing")
+        self.assertNotIn(PRIVATE_MARKER, result.stdout)
+        self.assertEqual(layout.state_file.read_bytes(), state_before)
+        self.assertFalse(unlinked_root.exists(), "plan must not create the target directory")
+        self.assertFalse((layout.home / "backups" / "codex-linux-repo-import").exists())
+
+        text_result = self.run_cli(
+            "plan",
+            "--codex-home",
+            str(layout.home),
+            "--timezone",
+            "UTC",
+            "--as-of",
+            "2026-08-12T12:00:00Z",
+            "--unlinked-project-root",
+            str(unlinked_root),
+        )
+        self.assertEqual(text_result.returncode, 0, text_result.stderr)
+        self.assertIn("Unlinked fallback", text_result.stdout)
+        self.assertIn(f"Target: {unlinked_root}", text_result.stdout)
+        self.assertIn("Native Project: create", text_result.stdout)
+        self.assertIn("Directory: create during apply", text_result.stdout)
+        self.assertIn("Candidate chats: 1", text_result.stdout)
+        self.assertIn("Accepted chats: 1", text_result.stdout)
+        self.assertFalse(unlinked_root.exists())
 
     def test_apply_requires_yes_before_any_native_mutation(self) -> None:
         layout = SyntheticCodexLayout(self.root, with_sessions=True)

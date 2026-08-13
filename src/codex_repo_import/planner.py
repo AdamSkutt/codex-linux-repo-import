@@ -10,11 +10,17 @@ from pathlib import Path
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
-from .models import Diagnostic, ProjectGroup, SessionRecord
+from .models import Diagnostic, ProjectGroup, ResolvedRoot, SessionRecord
 
 
 SIDEBAR_PREFERENCES_KEY = "flat-project-sidebar-preferences-v1"
 UNIFIED_PROJECT_ORDER_KEY = "unified-sidebar-project-order-v1"
+UNLINKED_PROJECT_NAME = "Unlinked Codex Chats"
+UNLINKED_ROOT_KINDS = frozenset({"ambiguous", "missing"})
+
+
+class PlannerError(RuntimeError):
+    pass
 
 
 def encode_state(state: dict[str, Any]) -> bytes:
@@ -54,6 +60,26 @@ def _existing_project_for_root(
         if any(isinstance(path, str) and _normalized_path(path) == normalized_root for path in root_paths):
             return project_id, project
     return None
+
+
+def _existing_projects_for_root(
+    projects: dict[str, Any],
+    root: str,
+) -> list[tuple[str, dict[str, Any]]]:
+    normalized_root = _normalized_path(root)
+    matches: list[tuple[str, dict[str, Any]]] = []
+    for project_id, project in projects.items():
+        if not isinstance(project, dict):
+            continue
+        root_paths = project.get("rootPaths")
+        if not isinstance(root_paths, list):
+            continue
+        if any(
+            isinstance(path, str) and _normalized_path(path) == normalized_root
+            for path in root_paths
+        ):
+            matches.append((project_id, project))
+    return matches
 
 
 def _deterministic_project_id(root: str, projects: dict[str, Any]) -> str:
@@ -140,7 +166,15 @@ def build_import_plan(
     activate_weighted_sort: bool = True,
     known_thread_ids: set[str] | None = None,
     diagnostics: list[Diagnostic] | None = None,
+    unlinked_project_root: str | None = None,
 ) -> ImportPlan:
+    if unlinked_project_root is not None:
+        normalized_unlinked_root = os.path.normpath(
+            str(Path(unlinked_project_root).expanduser())
+        )
+        if not os.path.isabs(normalized_unlinked_root):
+            raise PlannerError("unlinked Project root must be absolute")
+        unlinked_project_root = normalized_unlinked_root
     if as_of.tzinfo is None:
         as_of = as_of.replace(tzinfo=timezone.utc)
     as_of = as_of.astimezone(timezone.utc)
@@ -165,22 +199,78 @@ def build_import_plan(
         sidebar_orders = {}
     sidebar_orders = deepcopy(sidebar_orders)
 
+    existing_unlinked_match: tuple[str, dict[str, Any]] | None = None
+    if unlinked_project_root is not None:
+        root_matches = _existing_projects_for_root(projects, unlinked_project_root)
+        named_matches = [
+            (project_id, project)
+            for project_id, project in projects.items()
+            if isinstance(project, dict)
+            and isinstance(project.get("name"), str)
+            and project["name"].casefold() == UNLINKED_PROJECT_NAME.casefold()
+        ]
+        if len(root_matches) > 1 or len(named_matches) > 1:
+            raise PlannerError("native state contains duplicate Unlinked Codex Chats Projects")
+        if named_matches and named_matches != root_matches:
+            raise PlannerError(
+                "the native Unlinked Codex Chats Project already uses another root"
+            )
+        if root_matches:
+            project_id, project = root_matches[0]
+            if (
+                project.get("name") != UNLINKED_PROJECT_NAME
+                or project.get("rootPaths") != [unlinked_project_root]
+            ):
+                raise PlannerError(
+                    "unlinked Project reuse requires the exact fixed name and exactly one "
+                    "matching root"
+                )
+            existing_unlinked_match = (project_id, project)
+
+    source_groups = groups
+    unlinked_group: ProjectGroup | None = None
+    if unlinked_project_root is not None:
+        unlinked_sessions = [
+            session
+            for group in source_groups
+            if not group.root.eligible_for_apply and group.root.kind in UNLINKED_ROOT_KINDS
+            for session in group.sessions
+        ]
+        if unlinked_sessions:
+            unlinked_group = ProjectGroup(
+                root=ResolvedRoot(
+                    root=unlinked_project_root,
+                    kind="unlinked",
+                    eligible_for_apply=True,
+                ),
+                sessions=unlinked_sessions,
+                cwd_aliases={session.cwd for session in unlinked_sessions},
+            )
+    planning_groups = source_groups + ([unlinked_group] if unlinked_group is not None else [])
+
     def applicable_sessions(group: ProjectGroup) -> list[SessionRecord]:
         candidates = _ordered_apply_sessions(group, include_archived)
         if known_thread_ids is None:
             return candidates
         return [session for session in candidates if session.thread_id in known_thread_ids]
 
+    selected_groups = [
+        group
+        for group in planning_groups
+        if group.root.eligible_for_apply
+    ]
     missing_catalog_ids = sorted(
         {
             session.thread_id
-            for group in groups
+            for group in selected_groups
             for session in _ordered_apply_sessions(group, include_archived)
             if known_thread_ids is not None and session.thread_id not in known_thread_ids
         }
     )
     eligible_groups = [
-        group for group in groups if group.root.eligible_for_apply and applicable_sessions(group)
+        group
+        for group in planning_groups
+        if group.root.eligible_for_apply and applicable_sessions(group)
     ]
     labels = _project_labels(eligible_groups)
     project_ids: dict[str, str] = {}
@@ -188,9 +278,22 @@ def build_import_plan(
     reuse_projects: list[dict[str, Any]] = []
 
     for group in eligible_groups:
-        match = _existing_project_for_root(projects, group.root.root)
+        if group.root.kind == "unlinked":
+            match = existing_unlinked_match
+        else:
+            match = _existing_project_for_root(projects, group.root.root)
         if match is not None:
             project_id, existing = match
+            if group.root.kind == "unlinked":
+                root_paths = existing.get("rootPaths")
+                if (
+                    existing.get("name") != UNLINKED_PROJECT_NAME
+                    or root_paths != [group.root.root]
+                ):
+                    raise PlannerError(
+                        "unlinked Project reuse requires the exact fixed name and exactly one "
+                        "matching root"
+                    )
             project_ids[group.root.root] = project_id
             reuse_projects.append(
                 {
@@ -204,7 +307,11 @@ def build_import_plan(
         project_id = _deterministic_project_id(group.root.root, projects)
         project = {
             "id": project_id,
-            "name": labels[group.root.root],
+            "name": (
+                UNLINKED_PROJECT_NAME
+                if group.root.kind == "unlinked"
+                else labels[group.root.root]
+            ),
             "rootPaths": [group.root.root],
             "createdAt": now_ms,
             "updatedAt": now_ms,
@@ -237,7 +344,9 @@ def build_import_plan(
                 accepted_ids.append(session.thread_id)
                 projectless_set.discard(session.thread_id)
                 continue
-            if has_current and not reassign:
+            # A low-confidence fallback must never steal a thread from a real
+            # native Project, even when the global reassign override is set.
+            if has_current and (not reassign or group.root.kind == "unlinked"):
                 assignment_conflicts.append(
                     {
                         "thread_id": session.thread_id,
@@ -323,20 +432,66 @@ def build_import_plan(
     previous_order = after.get("project-order")
     if not isinstance(previous_order, list):
         previous_order = list(existing_projects)
+    ranked_groups = [group for group in eligible_groups if group.root.kind != "unlinked"]
     ranked_ids = _stable_unique(
         [
             project_ids[group.root.root]
-            for group in eligible_groups
+            for group in ranked_groups
             if project_ids[group.root.root] in accepted_project_ids
         ]
     )
     ranked_set = set(ranked_ids)
     all_project_ids = list(projects)
+    unlinked_ids = _stable_unique(
+        [
+            project_ids[group.root.root]
+            for group in eligible_groups
+            if group.root.kind == "unlinked"
+            and project_ids[group.root.root] in accepted_project_ids
+        ]
+    )
+    protected_unlinked_ids = _stable_unique(
+        ([existing_unlinked_match[0]] if existing_unlinked_match is not None else [])
+        + unlinked_ids
+    )
+    existing_unlinked_ids = _stable_unique(
+        [
+            value
+            for value in previous_order
+            if isinstance(value, str) and value in protected_unlinked_ids
+        ]
+    )
+    unordered_unlinked_ids = [
+        value for value in protected_unlinked_ids if value not in existing_unlinked_ids
+    ]
     project_order = _stable_unique(
         ranked_ids
-        + [value for value in previous_order if isinstance(value, str) and value not in ranked_set]
-        + [value for value in all_project_ids if value not in ranked_set]
+        + [
+            value
+            for value in previous_order
+            if isinstance(value, str)
+            and value not in ranked_set
+            and value not in protected_unlinked_ids
+        ]
+        + [
+            value
+            for value in all_project_ids
+            if value not in ranked_set and value not in protected_unlinked_ids
+        ]
     )
+    # Re-rank normal Projects inside the remaining slots without moving an
+    # already-present catch-all. If the native Project exists but has never had
+    # an order slot, it follows the same rule as a newly created catch-all.
+    existing_unlinked_positions = sorted(
+        (previous_order.index(project_id), project_id)
+        for project_id in existing_unlinked_ids
+    )
+    for previous_position, project_id in existing_unlinked_positions:
+        project_order.insert(min(previous_position, len(project_order)), project_id)
+
+    # A newly-created catch-all belongs at the end, not in the relevance
+    # ranking. The same applies to a reused catch-all with no prior order slot.
+    project_order.extend(unordered_unlinked_ids)
 
     preference_change: dict[str, Any] | None = None
     if activate_weighted_sort and ranked_ids:
@@ -363,20 +518,47 @@ def build_import_plan(
         unified_order = atom_state.get(UNIFIED_PROJECT_ORDER_KEY)
         if not isinstance(unified_order, list):
             unified_order = []
-        ranked_item_keys = [f"codex:project:{project_id}" for project_id in ranked_ids]
-        remaining_project_keys = [
+        ordered_project_keys = [
             f"codex:project:{project_id}"
             for project_id in project_order
-            if project_id not in ranked_set
         ]
         atom_state[UNIFIED_PROJECT_ORDER_KEY] = _stable_unique(
-            ranked_item_keys
-            + remaining_project_keys
+            ordered_project_keys
             + [value for value in unified_order if isinstance(value, str)]
         )
         after["electron-persisted-atom-state"] = atom_state
         if previous_mode != "manual":
             preference_change = {"projectSortMode": {"before": previous_mode, "after": "manual"}}
+
+    # When the user already chose manual Project ordering, append the catch-all
+    # to the unified list. Priority mode needs no atom mutation for a fallback
+    # by itself, which keeps an unlinked-only plan minimal and idempotent.
+    current_atoms = after.get("electron-persisted-atom-state")
+    current_preferences = (
+        current_atoms.get(SIDEBAR_PREFERENCES_KEY)
+        if isinstance(current_atoms, dict)
+        else None
+    )
+    already_manual = (
+        isinstance(current_preferences, dict)
+        and current_preferences.get("projectSortMode") == "manual"
+    )
+    if unlinked_ids and (ranked_ids or already_manual):
+        atom_state = after.get("electron-persisted-atom-state")
+        if not isinstance(atom_state, dict):
+            atom_state = {}
+        else:
+            atom_state = deepcopy(atom_state)
+        unified_order = atom_state.get(UNIFIED_PROJECT_ORDER_KEY)
+        if not isinstance(unified_order, list):
+            unified_order = []
+        unlinked_item_keys = [f"codex:project:{project_id}" for project_id in unlinked_ids]
+        if any(item not in unified_order for item in unlinked_item_keys):
+            atom_state[UNIFIED_PROJECT_ORDER_KEY] = _stable_unique(
+                [value for value in unified_order if isinstance(value, str)]
+                + unlinked_item_keys
+            )
+            after["electron-persisted-atom-state"] = atom_state
 
     after["local-projects"] = projects
     after["project-order"] = project_order
@@ -388,6 +570,41 @@ def build_import_plan(
 
     after_bytes = encode_state(after)
     after_sha256 = sha256_bytes(after_bytes)
+    before_atoms = before.get("electron-persisted-atom-state")
+    before_unified_order = (
+        before_atoms.get(UNIFIED_PROJECT_ORDER_KEY)
+        if isinstance(before_atoms, dict)
+        else None
+    )
+    after_atoms = after.get("electron-persisted-atom-state")
+    after_unified_order = (
+        after_atoms.get(UNIFIED_PROJECT_ORDER_KEY)
+        if isinstance(after_atoms, dict)
+        else None
+    )
+    unified_project_order_change = (
+        deepcopy(after_unified_order)
+        if after_unified_order != before_unified_order
+        else None
+    )
+    unlinked_candidate_count = (
+        len(_ordered_apply_sessions(unlinked_group, include_archived))
+        if unlinked_group is not None
+        else 0
+    )
+    unlinked_assignable_count = sum(
+        len(accepted_sessions_by_project.get(project_id, {}))
+        for project_id in unlinked_ids
+    )
+    managed_directories: list[dict[str, str]] = []
+    if unlinked_project_root is not None and unlinked_ids and not Path(unlinked_project_root).exists():
+        managed_directories.append(
+            {
+                "kind": "create_unlinked_project_root",
+                "path": unlinked_project_root,
+                "mode": "0700",
+            }
+        )
     manifest = {
         "schema_version": 1,
         "generated_at": as_of.isoformat().replace("+00:00", "Z"),
@@ -401,6 +618,7 @@ def build_import_plan(
             "include_archived": include_archived,
             "reassign": reassign,
             "activate_weighted_sort": activate_weighted_sort,
+            "unlinked_project_root": unlinked_project_root,
         },
         "projects": [
             {
@@ -426,13 +644,10 @@ def build_import_plan(
                 for project_id in ordered_thread_ids_by_project
             },
             "catalog_missing_thread_ids": missing_catalog_ids,
-            "unified_project_order": (
-                after.get("electron-persisted-atom-state", {}).get(UNIFIED_PROJECT_ORDER_KEY)
-                if activate_weighted_sort and ranked_ids
-                else None
-            ),
+            "unified_project_order": unified_project_order_change,
             "sidebar_preference_change": preference_change,
         },
+        "external_changes": {"managed_directories": managed_directories},
         "summary": {
             "extension_chats_found": sum(len(group.sessions) for group in groups),
             "active_extension_chats": sum(len(group.active_sessions) for group in groups),
@@ -444,6 +659,10 @@ def build_import_plan(
             "thread_assignments_to_write": len(assignment_updates),
             "thread_assignment_conflicts": len(assignment_conflicts),
             "threads_missing_from_native_catalog": len(missing_catalog_ids),
+            # Keep the original summary key for CLI/backward compatibility.
+            "unlinked_chats_selected": unlinked_candidate_count,
+            "unlinked_chats_candidates": unlinked_candidate_count,
+            "unlinked_chats_assignable": unlinked_assignable_count,
         },
         "state": {"before_sha256": before_sha256, "after_sha256": after_sha256},
         "diagnostics": [item.to_dict() for item in diagnostics or []],
