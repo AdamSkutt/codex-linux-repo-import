@@ -2,7 +2,7 @@
 
 `codex-linux-repo-import` gives every eligible project a deterministic score from 0 to 100. The score balances how often a project was used with how recently and consistently it was used.
 
-Ranking is based on active Codex VS Code extension chats. Archived chats are discovered and reported but do not contribute to the score, including when `--include-archived` is used to assign them.
+Ranking is based on active eligible conversations from both exact provenance classes: `vscode-extension` and `codex-desktop`. Archived conversations are discovered and reported but do not contribute to the score, including when `--include-archived` is used to assign them.
 
 ## Inputs
 
@@ -10,7 +10,7 @@ For one project:
 
 | Symbol | Meaning |
 | --- | --- |
-| `N` | Number of active extension chats |
+| `N` | Number of active eligible conversations |
 | `D` | Number of distinct local calendar days with an active chat |
 | `age` | Days between the newest active chat and the scoring time |
 | `span` | Days between the oldest and newest active chats |
@@ -64,7 +64,7 @@ Projects are sorted by:
 3. active chat count, descending;
 4. canonical project path, bytewise ascending.
 
-Imported chats inside a Project are sorted by start time descending, then thread ID ascending. Existing non-imported entries in a native Project remain after the imported entries in their previous relative order.
+Selected conversations inside a Project are sorted by start time descending, then task ID ascending. Existing non-selected entries in a native Project remain after them in their previous relative order.
 
 ## Reproducible plans
 

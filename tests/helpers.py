@@ -33,6 +33,7 @@ def session(
         archived=archived,
         rollout_path=Path(f"/synthetic/{thread_id}.jsonl"),
         originator="codex_vscode",
+        provenance="vscode-extension",
     )
 
 

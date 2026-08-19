@@ -44,7 +44,7 @@ Example:
 
 Selection is intentionally narrow:
 
-- active VS Code extension sessions from `missing` and `ambiguous` roots are merged;
+- active eligible sessions from `missing` and `ambiguous` roots are merged;
 - eligible repository/workspace sessions and `unresolved` paths are excluded;
 - archived sessions are excluded unless `--include-archived` is also supplied;
 - the native thread catalog is required, and catalog-missing threads are not written;
@@ -59,7 +59,7 @@ The importer never deletes the fallback directory or anything inside it. This no
 
 ## What the scanner reads
 
-The scanner opens candidate session JSONL files and reads only their first line, with a size limit. A file is eligible only when the first record is `session_meta` and its provenance exactly identifies a Codex VS Code extension session.
+The scanner opens candidate session JSONL files and reads only their first line, with a size limit. A file is eligible only when the first record is `session_meta` and its provenance exactly identifies either a Codex VS Code extension parent session or a Codex Desktop parent session. The Desktop class can include direct tasks and native external-agent imports; provider identity is not inferred.
 
 It does not read subsequent JSONL records, including prompts, model responses, commands, tool output, or patches. It never changes session files.
 
@@ -128,7 +128,7 @@ A pre-rollback safety backup is created before restoration. The restored result 
 These options weaken conservative defaults and should be used only after reviewing a fresh plan:
 
 - `--reassign` replaces an existing thread-to-project assignment instead of reporting a conflict.
-- `--include-archived` also assigns archived extension chats. Archived chats still do not influence ranking.
+- `--include-archived` also assigns archived eligible conversations. Archived conversations still do not influence ranking.
 - `--allow-untested` permits a schema-compatible but untested Desktop build. It does not bypass an incompatible schema result.
 
 `--reassign` never steals an existing assignment into `Unlinked Codex Chats`; that fallback-specific protection cannot be overridden.

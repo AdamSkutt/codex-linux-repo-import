@@ -27,6 +27,7 @@ class SessionRecord:
     archived: bool
     rollout_path: Path
     originator: str
+    provenance: str
     cli_version: str | None = None
     forked_from_id: str | None = None
 

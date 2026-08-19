@@ -59,7 +59,16 @@ Write commands enforce three distinct results:
 
 ## Session provenance
 
-Only sessions whose first metadata record exactly identifies both the Codex VS Code originator and VS Code source are imported. Desktop-originated chats and subagent sessions are excluded even if another metadata field mentions VS Code. Exact matching prevents agent forks or unrelated Desktop activity from inflating a project's rank.
+Only parent sessions whose first metadata record matches one of these exact pairs are selected:
+
+| Reported provenance | `originator` | `source` |
+| --- | --- | --- |
+| `vscode-extension` | `codex_vscode` | `vscode` |
+| `codex-desktop` | `Codex Desktop` | `vscode` |
+
+`codex-desktop` covers direct Desktop parent conversations and conversations converted into native rollouts by Desktop's external-agent import flow. They share the same exact first-record pair. That record does not retain a reliable provider name, so this tool does not claim that a task came from Claude Code, Cursor, or another provider. It does not ingest raw external-agent files itself.
+
+Subagent sessions use a structured source object and remain excluded. CLI, exec, ordinary Desktop, and every other originator/source pair are also excluded. Exact matching prevents forks or unrelated activity from inflating a Project's rank. See [ADR-001](ADR-001-SESSION-PROVENANCE.md).
 
 Active and archived session trees are deduplicated by thread ID, with the active record winning. Archived sessions are reported but excluded from assignment and scoring by default.
 
@@ -73,7 +82,7 @@ The fallback is opt-in and available only to `plan` and `apply` through:
 
 Omitting the flag preserves the existing behavior: ineligible groups are reported but untouched. Supplying it creates or reuses at most one local Project with the fixed native name `Unlinked Codex Chats` and the canonical target path as its single `rootPaths` entry.
 
-The fallback candidate set contains only VS Code extension sessions whose post-mapping root classification is `missing` or `ambiguous`. Eligible Git/workspace groups and `unresolved` roots remain separate and are never folded into the fallback. Archived fallback candidates are excluded by default and included only when the existing global `--include-archived` option is supplied.
+The fallback candidate set contains only eligible `vscode-extension` or `codex-desktop` sessions whose post-mapping root classification is `missing` or `ambiguous`. Eligible Git/workspace groups and `unresolved` roots remain separate and are never folded into the fallback. Archived fallback candidates are excluded by default and included only when the existing global `--include-archived` option is supplied.
 
 Native catalog membership is mandatory. A catalog-missing candidate receives no assignment, per-Project thread-order entry, or projectless-state mutation. An existing assignment is always preserved for fallback candidates; `--reassign` affects normal target Projects but cannot move a thread into `Unlinked Codex Chats`. The fallback Project is not created when every candidate is excluded as archived, catalog-missing, or already assigned elsewhere.
 

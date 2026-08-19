@@ -25,7 +25,12 @@ from .native_state import (
 from .planner import ImportPlan, PlannerError, UNLINKED_PROJECT_NAME, build_import_plan
 from .ranking import DEFAULT_TIMEZONE, rank_projects
 from .roots import git_root_for_path, group_sessions, parse_path_mapping, resolve_project_root
-from .sessions import scan_sessions
+from .sessions import (
+    PROVENANCE_LABELS,
+    VSCODE_EXTENSION,
+    count_session_provenance,
+    scan_sessions,
+)
 
 
 class CliError(RuntimeError):
@@ -290,14 +295,38 @@ def _project_rows(groups: list[ProjectGroup]) -> list[dict[str, Any]]:
                 "reason": group.root.reason,
                 "root": group.root.root,
                 "metrics": group.metrics,
+                "provenance": {
+                    "active": count_session_provenance(group.active_sessions),
+                    "archived": count_session_provenance(group.archived_sessions),
+                },
             }
         )
     return rows
 
 
+def _provenance_summary(groups: list[ProjectGroup]) -> dict[str, dict[str, int]]:
+    records = [session for group in groups for session in group.sessions]
+    return {
+        "active": count_session_provenance(item for item in records if not item.archived),
+        "archived": count_session_provenance(item for item in records if item.archived),
+    }
+
+
+def _format_provenance(summary: dict[str, dict[str, int]]) -> str:
+    keys = sorted(set(summary["active"]) | set(summary["archived"]))
+    if not keys:
+        return "none"
+    return "; ".join(
+        f"{PROVENANCE_LABELS.get(key, key)}: "
+        f"{summary['active'].get(key, 0)} active, "
+        f"{summary['archived'].get(key, 0)} archived"
+        for key in keys
+    )
+
+
 def _print_projects(groups: list[ProjectGroup]) -> None:
     if not groups:
-        print("No VS Code Codex extension chats found.")
+        print("No eligible Codex conversations found.")
         return
     print("Rank  Score  Chats  Archived  Kind       Apply  Project root")
     for row in _project_rows(groups):
@@ -308,6 +337,7 @@ def _print_projects(groups: list[ProjectGroup]) -> None:
         )
         if row["reason"]:
             print(f"      reason: {row['reason']}")
+    print(f"\nSources: {_format_provenance(_provenance_summary(groups))}")
 
 
 def _diagnostic_payload(diagnostics: list[Diagnostic]) -> list[dict[str, Any]]:
@@ -375,7 +405,7 @@ def _build_plan(
         mapping_values=args.map,
     )
     if not groups:
-        raise CliError("no VS Code Codex extension chats were found")
+        raise CliError("no eligible Codex conversations were found")
     snapshot = load_snapshot(layout.state_file)
     unlinked_root = _unlinked_project_root(
         args.unlinked_project_root,
@@ -524,9 +554,20 @@ def _command_doctor(args: argparse.Namespace) -> int:
         healthy = False
 
     sessions, diagnostics = scan_sessions(layout.sessions_dir, layout.archived_sessions_dir)
-    findings["extension_sessions"] = {
+    provenance = {
+        "active": count_session_provenance(item for item in sessions if not item.archived),
+        "archived": count_session_provenance(item for item in sessions if item.archived),
+    }
+    findings["eligible_sessions"] = {
         "active": sum(not item.archived for item in sessions),
         "archived": sum(item.archived for item in sessions),
+        "provenance": provenance,
+        "diagnostics": len(diagnostics),
+    }
+    # Preserve the v0.2 JSON field with corrected extension-only semantics.
+    findings["extension_sessions"] = {
+        "active": provenance["active"].get(VSCODE_EXTENSION, 0),
+        "archived": provenance["archived"].get(VSCODE_EXTENSION, 0),
         "diagnostics": len(diagnostics),
     }
     try:
@@ -553,11 +594,12 @@ def _command_doctor(args: argparse.Namespace) -> int:
         else:
             print(f"Native state: {state['compatibility']} — {state['reason']}")
             print(f"Main/.bak match: {state['backup_matches']}")
-        extension = findings["extension_sessions"]
+        eligible = findings["eligible_sessions"]
         print(
-            f"Extension chats: {extension['active']} active, "
-            f"{extension['archived']} archived"
+            f"Eligible conversations: {eligible['active']} active, "
+            f"{eligible['archived']} archived"
         )
+        print(f"Sources: {_format_provenance(eligible['provenance'])}")
         catalog = findings["native_thread_catalog"]
         print(
             f"Native catalog: {catalog.get('thread_count', 'ERROR')}"
@@ -651,7 +693,10 @@ def build_parser() -> argparse.ArgumentParser:
     shared = _shared_parser()
     parser = argparse.ArgumentParser(
         prog="codex-linux-repo-import",
-        description="Group VS Code Codex chats into native Linux Codex Projects.",
+        description=(
+            "Group Codex extension and Desktop conversations into "
+            "native Linux Codex Projects."
+        ),
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)

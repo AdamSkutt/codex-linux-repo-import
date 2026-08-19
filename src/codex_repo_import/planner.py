@@ -11,6 +11,7 @@ from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
 from .models import Diagnostic, ProjectGroup, ResolvedRoot, SessionRecord
+from .sessions import VSCODE_EXTENSION, count_session_provenance
 
 
 SIDEBAR_PREFERENCES_KEY = "flat-project-sidebar-preferences-v1"
@@ -605,6 +606,13 @@ def build_import_plan(
                 "mode": "0700",
             }
         )
+    all_sessions = [session for group in groups for session in group.sessions]
+    active_sessions = [session for session in all_sessions if not session.archived]
+    archived_sessions = [session for session in all_sessions if session.archived]
+    provenance_summary = {
+        "active": count_session_provenance(active_sessions),
+        "archived": count_session_provenance(archived_sessions),
+    }
     manifest = {
         "schema_version": 1,
         "generated_at": as_of.isoformat().replace("+00:00", "Z"),
@@ -629,6 +637,10 @@ def build_import_plan(
                 "metrics": group.metrics,
                 "active_chat_count": len(group.active_sessions),
                 "archived_chat_count": len(group.archived_sessions),
+                "provenance": {
+                    "active": count_session_provenance(group.active_sessions),
+                    "archived": count_session_provenance(group.archived_sessions),
+                },
             }
             for group in groups
         ],
@@ -649,9 +661,20 @@ def build_import_plan(
         },
         "external_changes": {"managed_directories": managed_directories},
         "summary": {
-            "extension_chats_found": sum(len(group.sessions) for group in groups),
-            "active_extension_chats": sum(len(group.active_sessions) for group in groups),
-            "archived_extension_chats": sum(len(group.archived_sessions) for group in groups),
+            "conversations_found": len(all_sessions),
+            "active_conversations": len(active_sessions),
+            "archived_conversations": len(archived_sessions),
+            "provenance": provenance_summary,
+            # Preserve v0.2 keys with corrected extension-only semantics.
+            "extension_chats_found": sum(
+                session.provenance == VSCODE_EXTENSION for session in all_sessions
+            ),
+            "active_extension_chats": sum(
+                session.provenance == VSCODE_EXTENSION for session in active_sessions
+            ),
+            "archived_extension_chats": sum(
+                session.provenance == VSCODE_EXTENSION for session in archived_sessions
+            ),
             "ranked_projects": len(groups),
             "eligible_projects": len(ranked_ids),
             "projects_to_create": len(create_projects),
