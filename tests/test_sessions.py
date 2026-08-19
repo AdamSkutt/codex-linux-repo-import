@@ -8,7 +8,9 @@ import unittest
 from unittest import mock
 
 from codex_repo_import.sessions import (
+    CODEX_DESKTOP,
     MAX_SESSION_META_BYTES,
+    VSCODE_EXTENSION,
     read_session_meta,
     scan_sessions,
 )
@@ -61,7 +63,7 @@ class ReadSessionMetaTests(unittest.TestCase):
         self.assertNotIn("MUST-NOT-LEAK", repr(record))
         self.assertNotIn("MUST-NOT-LEAK", json.dumps(public))
 
-    def test_exact_originator_and_source_filtering(self) -> None:
+    def test_exact_originator_and_source_classification(self) -> None:
         base = {
             "type": "session_meta",
             "payload": {
@@ -72,13 +74,32 @@ class ReadSessionMetaTests(unittest.TestCase):
                 "source": "vscode",
             },
         }
-        variants = (
-            ("Codex Desktop", "vscode"),
+        accepted = (
+            ("codex_vscode", "vscode", VSCODE_EXTENSION),
+            ("Codex Desktop", "vscode", CODEX_DESKTOP),
+        )
+        for originator, source, provenance in accepted:
+            with self.subTest(originator=originator, source=source):
+                envelope = json.loads(json.dumps(base))
+                envelope["payload"]["originator"] = originator
+                envelope["payload"]["source"] = source
+                handle = _OneLineHandle(json.dumps(envelope) + "\n")
+                with mock.patch.object(Path, "open", return_value=handle):
+                    record, diagnostic = read_session_meta(Path("ignored.jsonl"), archived=False)
+                self.assertIsNone(diagnostic)
+                self.assertIsNotNone(record)
+                assert record is not None
+                self.assertEqual(record.provenance, provenance)
+                self.assertEqual(record.originator, originator)
+
+        rejected = (
             ("codex_vscode", {"subagent": "critic"}),
+            ("Codex Desktop", {"subagent": "critic"}),
+            ("Codex Desktop", "desktop"),
             ("codex_vscode ", "vscode"),
             ("codex_vscode", "VSCode"),
         )
-        for originator, source in variants:
+        for originator, source in rejected:
             with self.subTest(originator=originator, source=source):
                 envelope = json.loads(json.dumps(base))
                 envelope["payload"]["originator"] = originator
@@ -192,19 +213,25 @@ class ReadSessionMetaTests(unittest.TestCase):
 
 
 class ScanSessionsTests(unittest.TestCase):
-    def test_fixture_scan_filters_non_extension_sessions_and_active_wins_dedupe(self) -> None:
+    def test_fixture_scan_keeps_supported_parents_and_active_wins_dedupe(self) -> None:
         fixture_root = FIXTURES / "sessions"
         records, diagnostics = scan_sessions(
             fixture_root / "active",
             fixture_root / "archived",
         )
 
-        self.assertEqual([item.thread_id for item in records], ["thread-archived", "thread-active"])
+        self.assertEqual(
+            [item.thread_id for item in records],
+            ["thread-archived", "thread-active", "thread-desktop"],
+        )
         active = next(item for item in records if item.thread_id == "thread-active")
         self.assertFalse(active.archived)
         self.assertEqual(active.cwd, "/workspace/alpha")
         archived = next(item for item in records if item.thread_id == "thread-archived")
         self.assertTrue(archived.archived)
+        desktop = next(item for item in records if item.thread_id == "thread-desktop")
+        self.assertEqual(desktop.provenance, CODEX_DESKTOP)
+        self.assertEqual(desktop.originator, "Codex Desktop")
         self.assertEqual(
             sorted(item.code for item in diagnostics),
             ["duplicate_thread_id", "missing_session_meta"],

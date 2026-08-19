@@ -28,6 +28,7 @@ def _session(thread_id: str, cwd: Path) -> SessionRecord:
         archived=False,
         rollout_path=Path(f"/rollouts/{thread_id}.jsonl"),
         originator="codex_vscode",
+        provenance="vscode-extension",
     )
 
 

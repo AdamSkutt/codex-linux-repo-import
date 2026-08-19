@@ -50,6 +50,7 @@ def _write_rollout(
     thread_id: str,
     timestamp: str,
     cwd: Path,
+    originator: str = "codex_vscode",
 ) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     meta = {
@@ -58,7 +59,7 @@ def _write_rollout(
             "id": thread_id,
             "timestamp": timestamp,
             "cwd": str(cwd),
-            "originator": "codex_vscode",
+            "originator": originator,
             "source": "vscode",
         },
     }
@@ -70,7 +71,13 @@ def _write_rollout(
 
 
 class SyntheticCodexLayout:
-    def __init__(self, root: Path, *, with_sessions: bool) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        with_sessions: bool,
+        with_codex_desktop: bool = False,
+    ) -> None:
         self.home = root / "codex-home"
         self.sessions = self.home / "sessions"
         self.archived = self.home / "archived_sessions"
@@ -87,6 +94,8 @@ class SyntheticCodexLayout:
         (self.project / ".git").mkdir()
 
         thread_ids = ["thread-active", "thread-archived"] if with_sessions else []
+        if with_sessions and with_codex_desktop:
+            thread_ids.append("thread-imported")
         state_payload = json.dumps(
             _native_state(thread_ids),
             ensure_ascii=False,
@@ -121,6 +130,15 @@ class SyntheticCodexLayout:
                 timestamp="2026-07-01T10:00:00Z",
                 cwd=self.project,
             )
+            if with_codex_desktop:
+                _write_rollout(
+                    self.sessions / "2026" / "08",
+                    filename="rollout-imported.jsonl",
+                    thread_id="thread-imported",
+                    timestamp="2026-08-11T10:00:00Z",
+                    cwd=self.project,
+                    originator="Codex Desktop",
+                )
 
 
 class CliIntegrationTests(unittest.TestCase):
@@ -201,6 +219,49 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertTrue(project["eligible"])
         self.assertNotIn(PRIVATE_MARKER, result.stdout)
         self.assertEqual(hashlib.sha256(layout.state_file.read_bytes()).hexdigest(), state_before)
+
+    def test_plan_includes_codex_desktop_parents_without_guessing_provider(self) -> None:
+        layout = SyntheticCodexLayout(
+            self.root,
+            with_sessions=True,
+            with_codex_desktop=True,
+        )
+
+        result = self.run_cli(
+            "plan",
+            "--codex-home",
+            str(layout.home),
+            "--timezone",
+            "UTC",
+            "--as-of",
+            "2026-08-12T12:00:00Z",
+            "--json",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        manifest = json.loads(result.stdout)
+        summary = manifest["summary"]
+        self.assertEqual(summary["conversations_found"], 3)
+        self.assertEqual(summary["active_conversations"], 2)
+        self.assertEqual(summary["archived_conversations"], 1)
+        self.assertEqual(summary["extension_chats_found"], 2)
+        self.assertEqual(
+            summary["provenance"],
+            {
+                "active": {"codex-desktop": 1, "vscode-extension": 1},
+                "archived": {"vscode-extension": 1},
+            },
+        )
+        self.assertEqual(summary["thread_assignments_to_write"], 2)
+        self.assertEqual(
+            manifest["projects"][0]["provenance"],
+            {
+                "active": {"codex-desktop": 1, "vscode-extension": 1},
+                "archived": {"vscode-extension": 1},
+            },
+        )
+        self.assertNotIn("claude", result.stdout.casefold())
+        self.assertNotIn("cursor", result.stdout.casefold())
 
     def test_plan_json_uses_catalog_and_is_a_true_dry_run(self) -> None:
         layout = SyntheticCodexLayout(self.root, with_sessions=True)
@@ -430,7 +491,7 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertEqual(layout.state_backup_file.read_bytes(), backup_before)
         self.assertFalse((layout.home / "backups" / "codex-linux-repo-import").exists())
 
-    def test_plan_without_extension_chats_returns_a_clear_error(self) -> None:
+    def test_plan_without_eligible_conversations_returns_a_clear_error(self) -> None:
         layout = SyntheticCodexLayout(self.root, with_sessions=False)
 
         result = self.run_cli(
@@ -442,7 +503,7 @@ class CliIntegrationTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stdout, "")
-        self.assertIn("no VS Code Codex extension chats were found", result.stderr)
+        self.assertIn("no eligible Codex conversations were found", result.stderr)
 
     def test_backups_json_is_empty_for_a_fresh_layout(self) -> None:
         layout = SyntheticCodexLayout(self.root, with_sessions=False)
@@ -480,7 +541,22 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertEqual(payload["desktop_version"], TESTED_VERSION)
         self.assertEqual(payload["native_state"]["compatibility"], "tested")
         self.assertTrue(payload["native_state"]["backup_matches"])
-        self.assertEqual(payload["extension_sessions"], {"active": 1, "archived": 1, "diagnostics": 0})
+        self.assertEqual(
+            payload["eligible_sessions"],
+            {
+                "active": 1,
+                "archived": 1,
+                "provenance": {
+                    "active": {"vscode-extension": 1},
+                    "archived": {"vscode-extension": 1},
+                },
+                "diagnostics": 0,
+            },
+        )
+        self.assertEqual(
+            payload["extension_sessions"],
+            {"active": 1, "archived": 1, "diagnostics": 0},
+        )
         self.assertEqual(payload["native_thread_catalog"]["thread_count"], 2)
         self.assertTrue(payload["ready_for_offline_apply"])
 

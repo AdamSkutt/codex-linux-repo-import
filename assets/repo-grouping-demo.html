@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Codex repository grouping demo</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #07111f;
+      color: #f4f7fb;
+    }
+    * { box-sizing: border-box; }
+    html, body { width: 1200px; height: 675px; margin: 0; overflow: hidden; }
+    body {
+      padding: 34px 48px;
+      background:
+        radial-gradient(circle at 15% 5%, rgba(35, 134, 255, .18), transparent 32%),
+        radial-gradient(circle at 88% 0%, rgba(70, 219, 163, .14), transparent 29%),
+        #07111f;
+    }
+    header { display: flex; justify-content: space-between; align-items: end; margin-bottom: 24px; }
+    h1 { margin: 0; font-size: 32px; letter-spacing: -.8px; }
+    header p { margin: 8px 0 0; color: #9fb0c7; font-size: 16px; }
+    .local { color: #46dba3; font: 700 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    main { display: grid; grid-template-columns: 1fr 64px 1fr; align-items: center; }
+    .panel {
+      height: 390px;
+      padding: 20px;
+      border: 1px solid #24364e;
+      border-radius: 16px;
+      background: rgba(11, 24, 41, .92);
+      box-shadow: 0 24px 70px rgba(0, 0, 0, .28);
+    }
+    .panel.after { border-color: rgba(70, 219, 163, .5); }
+    .panel-title { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+    h2 { margin: 0; font-size: 18px; }
+    .state { padding: 5px 9px; border-radius: 999px; background: #19283b; color: #9fb0c7; font-size: 12px; }
+    .after .state { background: rgba(70, 219, 163, .12); color: #62e9b5; }
+    .hint { margin: 0 0 14px; color: #72849b; font-size: 13px; }
+    .task, .project {
+      margin: 8px 0;
+      padding: 11px 12px;
+      border: 1px solid #22344b;
+      border-radius: 10px;
+      background: #0d1b2d;
+    }
+    .task {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      align-items: center;
+      margin: 6px 0;
+      padding: 8px 10px;
+    }
+    .task strong { font-size: 13px; font-weight: 650; }
+    .task small { display: block; margin-top: 2px; color: #71849c; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .chip { padding: 4px 7px; border-radius: 6px; font-size: 10px; font-weight: 700; letter-spacing: .2px; }
+    .vscode { color: #76b8ff; background: rgba(35, 134, 255, .13); }
+    .import { color: #d6a6ff; background: rgba(172, 99, 255, .13); }
+    .project { padding: 12px 14px; }
+    .project-head { display: flex; justify-content: space-between; align-items: center; }
+    .project-name { font-weight: 750; font-size: 14px; }
+    .score { color: #46dba3; font: 700 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .path { margin-top: 3px; color: #6f829a; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .nested { display: flex; gap: 6px; margin-top: 9px; }
+    .nested span { padding: 5px 7px; border-radius: 6px; background: #15253a; color: #b7c4d4; font-size: 10px; }
+    .arrow { text-align: center; color: #46dba3; font-size: 34px; font-weight: 300; }
+    .terminal {
+      margin-top: 20px;
+      height: 116px;
+      padding: 14px 18px;
+      border: 1px solid #24364e;
+      border-radius: 13px;
+      background: #050b14;
+      font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      color: #b7c4d4;
+    }
+    .prompt { color: #46dba3; }
+    .muted { color: #71849c; }
+    .source-line { color: #91c7ff; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>From flat history to repository Projects</h1>
+      <p>VS Code extension + Codex Desktop tasks, organized locally</p>
+    </div>
+    <div class="local">LOCAL-FIRST · DRY-RUN DEFAULT</div>
+  </header>
+
+  <main>
+    <section class="panel">
+      <div class="panel-title"><h2>Before</h2><span class="state">projectless</span></div>
+      <p class="hint">Tasks exist in Codex, but repository context is lost.</p>
+      <div class="task"><div><strong>Add release verification</strong><small>~/work/atlas-cli</small></div><span class="chip vscode">VS CODE</span></div>
+      <div class="task"><div><strong>Review rollback contract</strong><small>~/work/audit-kit</small></div><span class="chip import">IMPORT</span></div>
+      <div class="task"><div><strong>Fix path mapping</strong><small>~/work/atlas-cli/src</small></div><span class="chip import">IMPORT</span></div>
+      <div class="task"><div><strong>Document scoring</strong><small>~/work/atlas-cli/docs</small></div><span class="chip vscode">VS CODE</span></div>
+      <div class="task"><div><strong>Test native backup</strong><small>~/work/audit-kit</small></div><span class="chip vscode">VS CODE</span></div>
+    </section>
+
+    <div class="arrow">→</div>
+
+    <section class="panel after">
+      <div class="panel-title"><h2>After</h2><span class="state">native Projects</span></div>
+      <p class="hint">Git roots are grouped, ranked, and ordered transparently.</p>
+      <div class="project">
+        <div class="project-head"><span class="project-name">⌄ atlas-cli</span><span class="score">73.2</span></div>
+        <div class="path">~/work/atlas-cli</div>
+        <div class="nested"><span>Add release verification</span><span>Fix path mapping</span><span>+1</span></div>
+      </div>
+      <div class="project">
+        <div class="project-head"><span class="project-name">⌄ audit-kit</span><span class="score">51.8</span></div>
+        <div class="path">~/work/audit-kit</div>
+        <div class="nested"><span>Review rollback contract</span><span>Test native backup</span></div>
+      </div>
+      <div class="project">
+        <div class="project-head"><span class="project-name">Safety gates</span><span class="score">verified</span></div>
+        <div class="nested"><span>CAS</span><span>backup</span><span>rollback</span><span>offline apply</span></div>
+      </div>
+    </section>
+  </main>
+
+  <section class="terminal">
+    <div><span class="prompt">$</span> codex-linux-repo-import scan</div>
+    <div>1&nbsp;&nbsp;73.2&nbsp;&nbsp;3 chats&nbsp;&nbsp;<span class="muted">git</span>&nbsp;&nbsp;~/work/atlas-cli</div>
+    <div>2&nbsp;&nbsp;51.8&nbsp;&nbsp;2 chats&nbsp;&nbsp;<span class="muted">git</span>&nbsp;&nbsp;~/work/audit-kit</div>
+    <div class="source-line">Sources: Codex Desktop: 2 active; VS Code extension: 3 active</div>
+    <div><span class="prompt">$</span> codex-linux-repo-import plan <span class="muted"># dry-run; no files changed</span></div>
+  </section>
+</body>
+</html>

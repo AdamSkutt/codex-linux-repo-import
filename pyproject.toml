@@ -4,13 +4,26 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codex-linux-repo-import"
-version = "0.2.0"
-description = "Group VS Code Codex chats by repository in the native Linux Codex sidebar"
+version = "0.3.0"
+description = "Group Codex extension and Desktop conversations by repository on Linux"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "AdamSkutt" }]
-keywords = ["codex", "chatgpt", "vscode", "linux", "chat-history"]
+keywords = [
+  "codex",
+  "openai",
+  "chatgpt",
+  "vscode",
+  "linux",
+  "codex-desktop",
+  "chat-history",
+  "claude-code",
+  "developer-tools",
+  "local-first",
+  "migration-tool",
+  "project-management",
+]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
@@ -25,6 +38,7 @@ dependencies = []
 [project.urls]
 Homepage = "https://github.com/AdamSkutt/codex-linux-repo-import"
 Issues = "https://github.com/AdamSkutt/codex-linux-repo-import/issues"
+Changelog = "https://github.com/AdamSkutt/codex-linux-repo-import/blob/main/CHANGELOG.md"
 
 [project.scripts]
 codex-linux-repo-import = "codex_repo_import.cli:main"

@@ -9,6 +9,35 @@ from .models import Diagnostic, SessionRecord
 
 
 MAX_SESSION_META_BYTES = 4 * 1024 * 1024
+VSCODE_EXTENSION = "vscode-extension"
+CODEX_DESKTOP = "codex-desktop"
+PROVENANCE_LABELS = {
+    VSCODE_EXTENSION: "VS Code extension",
+    CODEX_DESKTOP: "Codex Desktop",
+}
+
+
+def classify_session_provenance(originator: object, source: object) -> str | None:
+    """Classify supported parent sessions without guessing an external provider.
+
+    Codex Desktop parent conversations use the same exact pair whether they
+    were created in Desktop or rewritten from a supported external agent. The
+    first metadata record does not retain a reliable provider name, so keep the
+    provenance generic and exact.
+    """
+
+    if originator == "codex_vscode" and source == "vscode":
+        return VSCODE_EXTENSION
+    if originator == "Codex Desktop" and source == "vscode":
+        return CODEX_DESKTOP
+    return None
+
+
+def count_session_provenance(records: Iterable[SessionRecord]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for record in records:
+        counts[record.provenance] = counts.get(record.provenance, 0) + 1
+    return {key: counts[key] for key in sorted(counts)}
 
 
 def _parse_timestamp(value: object) -> datetime:
@@ -55,7 +84,11 @@ def read_session_meta(path: Path, *, archived: bool) -> tuple[SessionRecord | No
 
     # Exact matching matters: subagent sessions use a source object and must not
     # inflate projects that happen to use more agents.
-    if payload.get("originator") != "codex_vscode" or payload.get("source") != "vscode":
+    provenance = classify_session_provenance(
+        payload.get("originator"),
+        payload.get("source"),
+    )
+    if provenance is None:
         return None, None
 
     thread_id = payload.get("id")
@@ -79,7 +112,8 @@ def read_session_meta(path: Path, *, archived: bool) -> tuple[SessionRecord | No
             cwd=cwd,
             archived=archived,
             rollout_path=path,
-            originator="codex_vscode",
+            originator=str(payload.get("originator")),
+            provenance=provenance,
             cli_version=cli_version if isinstance(cli_version, str) else None,
             forked_from_id=forked_from_id if isinstance(forked_from_id, str) else None,
         ),
