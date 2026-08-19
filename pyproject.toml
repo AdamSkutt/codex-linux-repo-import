@@ -12,12 +12,17 @@ license = { text = "MIT" }
 authors = [{ name = "AdamSkutt" }]
 keywords = [
   "codex",
+  "openai",
   "chatgpt",
   "vscode",
   "linux",
+  "codex-desktop",
   "chat-history",
   "claude-code",
+  "developer-tools",
+  "local-first",
   "migration-tool",
+  "project-management",
 ]
 classifiers = [
   "Development Status :: 3 - Alpha",

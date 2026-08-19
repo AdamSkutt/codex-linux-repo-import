@@ -6,6 +6,8 @@
 
 <p align="center">
   <a href="https://github.com/AdamSkutt/codex-linux-repo-import/actions/workflows/tests.yml"><img src="https://github.com/AdamSkutt/codex-linux-repo-import/actions/workflows/tests.yml/badge.svg" alt="Tests"></a>
+  <a href="https://github.com/AdamSkutt/codex-linux-repo-import/releases/latest"><img src="https://img.shields.io/github/v/release/AdamSkutt/codex-linux-repo-import" alt="Latest release"></a>
+  <a href="https://github.com/AdamSkutt/codex-linux-repo-import/stargazers"><img src="https://img.shields.io/github/stars/AdamSkutt/codex-linux-repo-import?style=social" alt="GitHub stars"></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&amp;logoColor=white" alt="Python 3.11+"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License"></a>
 </p>
@@ -13,6 +15,8 @@
 Turn a flat Codex Linux history into native Projects grouped by repository or workspace. The tool organizes both Codex VS Code extension conversations and Codex Desktop parent conversations, including conversations already brought in through Desktop's external-agent import flow.
 
 It is local-first, dry-run by default, dependency-free at runtime, and designed around verified backup and rollback.
+
+If this fixes your flat Codex sidebar, [star the repository](https://github.com/AdamSkutt/codex-linux-repo-import) so other Linux Codex users can find it.
 
 > [!IMPORTANT]
 > This is an independent, early-stage compatibility tool. It is not an official OpenAI project. Native Desktop Project assignment currently has no public API, so `apply` uses a version-gated adapter for the local Desktop state format. The adapter is tested only with Linux Codex Desktop `26.803.81509`.
