@@ -27,8 +27,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          if gh api "repos/${REPOSITORY}/git/ref/heads/${HEAD_REF}" >/dev/null 2>&1; then
-            gh api --method DELETE "repos/${REPOSITORY}/git/refs/heads/${HEAD_REF}"
+          encoded_ref="$(
+            python3 -c 'import os, urllib.parse; print(urllib.parse.quote(os.environ["HEAD_REF"], safe=""))'
+          )"
+
+          if gh api "repos/${REPOSITORY}/git/ref/heads/${encoded_ref}" >/dev/null 2>&1; then
+            gh api --method DELETE "repos/${REPOSITORY}/git/refs/heads/${encoded_ref}"
             printf 'Deleted merged branch %s\n' "${HEAD_REF}"
           else
             printf 'Merged branch %s is already absent\n' "${HEAD_REF}"
