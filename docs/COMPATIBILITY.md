@@ -1,6 +1,21 @@
 # Compatibility
 
-## Support matrix
+The tool has two independent compatibility surfaces: Claude Code conversion through an experimental Codex App Server API, and Linux Desktop Project assignment through a private-state adapter.
+
+## Claude import support matrix
+
+| Environment | Plan | Import |
+| --- | --- | --- |
+| Linux, Python 3.11+, Codex CLI `0.133.0` | Tested | Tested experimental protocol |
+| Another Codex CLI exposing `externalAgentConfig/import` | Available | Untested; App Server may reject a changed protocol |
+| Codex CLI without the external-migration capability | Available | Refused by Codex startup/protocol validation |
+| macOS or Windows | Not a supported target | Not supported |
+
+`claude plan` parses only the Claude source layout and Codex import history, so it can still report candidates when conversion compatibility is unavailable. `claude import` uses `--enable external_migration app-server --listen stdio://`, initializes experimental API capability, and submits one `SESSIONS` item at a time. Successful completion must also produce a verifiable Codex import-ledger entry.
+
+The current App Server detector defaults to sessions from the last 30 days and at most 50 sessions. This tool enumerates all direct Claude Code JSONL sessions itself and uses the App Server only for conversion, so those detector defaults do not truncate its plan. Source files remain read-only. App Server also validates imported paths against the active user's `~/.claude/projects`; alternate `--claude-projects` roots are therefore plan-only and never implemented by shadowing the process home.
+
+## Project-grouping support matrix
 
 | Environment | Scan and plan | Apply and rollback |
 | --- | --- | --- |
@@ -13,9 +28,9 @@
 
 ## Public API boundary
 
-[OpenAI Projects documentation](https://learn.chatgpt.com/docs/projects) describes Projects as workspaces for related chats and context. [Codex App Server documentation](https://learn.chatgpt.com/docs/app-server) and the open-source [App Server protocol reference](https://github.com/openai/codex/blob/f317dc8a17d30d8feb2c79add1d9d565be0402bf/codex-rs/app-server/README.md) expose thread-oriented operations, but currently do not provide a supported operation for assigning existing historical Desktop threads to a native local Project.
+[OpenAI Projects documentation](https://learn.chatgpt.com/docs/projects) describes Projects as workspaces for related chats and context. The open-source [App Server protocol reference](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md) exposes the experimental external-agent detection/import methods used for Claude conversion, but it does not provide an operation for assigning existing historical Desktop threads to a native local Project.
 
-Accordingly, this project does not pretend to use a stable public import API. `apply` is a compatibility adapter over the local Linux Desktop state and is guarded as such. If OpenAI adds a supported project-assignment API, that API should replace the private-state adapter.
+Accordingly, `claude import` is explicitly versioned as an experimental-protocol integration, while the separate `apply` command is a compatibility adapter over the local Linux Desktop state. If OpenAI adds a supported Project-assignment API, that API should replace the private-state adapter.
 
 ## Native state contract
 
@@ -39,7 +54,7 @@ electron-persisted-atom-state.flat-project-sidebar-preferences-v1
 electron-persisted-atom-state.unified-sidebar-project-order-v1
 ```
 
-Unknown state is preserved. The tool does not write session JSONL files, the native thread SQLite database, or Chromium storage.
+Unknown state is preserved. The Project `apply` command does not write session JSONL files, the native thread SQLite database, or Chromium storage. `claude import` has a separate contract: Codex App Server creates native rollouts and updates its own catalog/import ledger while the source Claude JSONL remains unchanged.
 
 When `--unlinked-project-root PATH` is supplied, apply may also create one private dedicated local directory outside native state. The backup manifest records the reviewed creation intent, but the directory is never treated as deletable importer-owned state and does not broaden the native-state key allowlist above.
 
@@ -66,7 +81,7 @@ Only parent sessions whose first metadata record matches one of these exact pair
 | `vscode-extension` | `codex_vscode` | `vscode` |
 | `codex-desktop` | `Codex Desktop` | `vscode` |
 
-`codex-desktop` covers direct Desktop parent conversations and conversations converted into native rollouts by Desktop's external-agent import flow. They share the same exact first-record pair. That record does not retain a reliable provider name, so this tool does not claim that a task came from Claude Code, Cursor, or another provider. It does not ingest raw external-agent files itself.
+`codex-desktop` covers direct Desktop parent conversations and conversations converted into native rollouts by an external-agent import flow, including this tool's Claude conversion. They share the same exact first-record pair. That record does not retain a reliable provider name, so the later grouping scan does not claim that a native task came from Claude Code, Cursor, or another provider. Raw ingestion is a separate, explicitly selected Claude Code operation.
 
 Subagent sessions use a structured source object and remain excluded. CLI, exec, ordinary Desktop, and every other originator/source pair are also excluded. Exact matching prevents forks or unrelated activity from inflating a Project's rank. See [ADR-001](ADR-001-SESSION-PROVENANCE.md).
 

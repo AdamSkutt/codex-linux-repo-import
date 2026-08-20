@@ -74,4 +74,4 @@ Provider labels are useful but not required for repository grouping. The core pr
 
 1. [x] Add exact provenance classification and synthetic coverage.
 2. [x] Expose provenance counts in scan, plan, and doctor output.
-3. [x] Document that this tool organizes native imports but does not ingest raw external-agent files.
+3. [x] Keep provider-neutral grouping separate from the explicit Claude Code ingestion command and document both privacy boundaries.

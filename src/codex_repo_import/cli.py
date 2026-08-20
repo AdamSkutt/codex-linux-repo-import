@@ -13,6 +13,19 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import __version__
 from .catalog import CatalogError, load_thread_catalog
+from .claude_import import (
+    ClaudeImportError,
+    ClaudeImportPlan,
+    ClaudeImportResult,
+    CodexAppServerClient,
+    claude_import_lock,
+    completion_failures,
+    create_claude_import_backup,
+    finalize_claude_import_backup,
+    imported_target_for,
+    scan_claude_history,
+    source_is_unchanged,
+)
 from .models import Diagnostic, ProjectGroup
 from .native_state import (
     NativeStateError,
@@ -49,6 +62,16 @@ class Layout:
 
 def _path(value: str) -> Path:
     return Path(value).expanduser().absolute()
+
+
+def _positive_float(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a number") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return parsed
 
 
 def _layout(args: argparse.Namespace) -> Layout:
@@ -653,6 +676,230 @@ def _command_rollback(args: argparse.Namespace) -> int:
     return 0
 
 
+def _build_claude_plan(args: argparse.Namespace) -> ClaudeImportPlan:
+    layout = _layout(args)
+    projects_root = (
+        _path(args.claude_projects)
+        if args.claude_projects
+        else Path.home() / ".claude" / "projects"
+    )
+    selected_sources = [Path(value).expanduser() for value in args.source or []]
+    return scan_claude_history(
+        projects_root,
+        layout.codex_home,
+        selected_sources=selected_sources,
+        allow_large_sessions=args.allow_large_sessions,
+    )
+
+
+def _validate_claude_import_root(source_root: Path) -> None:
+    expected_raw = Path.home() / ".claude" / "projects"
+    try:
+        expected = expected_raw.resolve(strict=True)
+    except OSError as exc:
+        raise CliError(f"cannot resolve the active Claude projects directory: {exc}") from exc
+    if source_root != expected:
+        raise CliError(
+            "Codex App Server imports sessions only from the active "
+            f"HOME source {expected}; --claude-projects may inspect another root "
+            "with `claude plan`, but cannot import it"
+        )
+
+
+def _print_claude_plan(plan: ClaudeImportPlan) -> None:
+    print("Claude Code history plan")
+    print(f"  Source: {plan.source_root} (read-only)")
+    print(f"  Sessions discovered: {len(plan.candidates)}")
+    print(f"  Ready to import: {len(plan.pending)}")
+    print(f"  Already imported: {len(plan.imported)}")
+    print(f"  Blocked: {len(plan.blocked)}")
+    print(f"  Diagnostics: {len(plan.diagnostics)}")
+
+    if plan.pending:
+        workspaces: dict[str, int] = {}
+        for candidate in plan.pending:
+            workspaces[candidate.target_cwd] = workspaces.get(candidate.target_cwd, 0) + 1
+        print("\nPending workspaces")
+        for cwd, count in sorted(workspaces.items()):
+            print(f"  {count:>4}  {cwd}")
+
+    if plan.blocked:
+        print("\nBlocked sessions")
+        for candidate in plan.blocked:
+            print(f"  {candidate.source_path}")
+            print(f"       {candidate.blocked_reason}")
+
+    if plan.diagnostics:
+        print("\nDiagnostics")
+        for diagnostic in plan.diagnostics:
+            location = f" [{diagnostic.path}]" if diagnostic.path else ""
+            print(f"  {diagnostic.code}{location}: {diagnostic.message}")
+
+
+def _command_claude_plan(args: argparse.Namespace) -> int:
+    plan = _build_claude_plan(args)
+    if args.json:
+        print(json.dumps(plan.to_public_dict(), indent=2, ensure_ascii=False))
+        return 0
+    _print_claude_plan(plan)
+    print("\nDry-run only. Claude source and Codex state were not changed.")
+    if plan.pending:
+        print("Review this plan, then run `claude import` with the same options and --yes.")
+    return 0
+
+
+def _command_claude_import(args: argparse.Namespace) -> int:
+    if not args.yes:
+        raise CliError("claude import requires --yes after you review `claude plan`")
+    layout = _layout(args)
+    plan = _build_claude_plan(args)
+    if not plan.pending:
+        if args.json:
+            payload = plan.to_public_dict()
+            payload["results"] = []
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            _print_claude_plan(plan)
+            print("\nNo new Claude Code sessions need importing.")
+        return 2 if plan.blocked else 0
+    if is_desktop_running():
+        raise CliError(
+            "fully quit Codex Desktop before importing Claude history; "
+            "the source plan remains unchanged"
+        )
+    _validate_claude_import_root(plan.source_root)
+
+    results: list[ClaudeImportResult] = []
+    backup = None
+    with claude_import_lock(layout.backup_root):
+        # Rebuild under the lock so source/import-history changes between the
+        # reviewed plan and mutation cannot silently widen the operation.
+        locked_plan = _build_claude_plan(args)
+        reviewed = {
+            (str(item.source_path), item.content_sha256, item.target_cwd)
+            for item in plan.pending
+        }
+        locked = {
+            (str(item.source_path), item.content_sha256, item.target_cwd)
+            for item in locked_plan.pending
+        }
+        if reviewed != locked:
+            raise ClaudeImportError(
+                "Claude source or import history changed while preparing; rerun `claude plan`"
+            )
+
+        backup = create_claude_import_backup(
+            layout.codex_home,
+            layout.backup_root,
+            locked_plan.pending,
+        )
+        try:
+            with CodexAppServerClient(
+                codex_home=layout.codex_home,
+                codex_bin=args.codex_bin,
+                timeout=args.timeout,
+            ) as client:
+                for index, candidate in enumerate(locked_plan.pending):
+                    if not source_is_unchanged(candidate):
+                        results.append(
+                            ClaudeImportResult(
+                                candidate.source_path,
+                                "failed",
+                                message="source changed after planning; rerun the plan",
+                            )
+                        )
+                        continue
+                    try:
+                        completion = client.import_session(candidate)
+                    except ClaudeImportError as exc:
+                        results.append(
+                            ClaudeImportResult(
+                                candidate.source_path,
+                                "failed",
+                                message=str(exc),
+                            )
+                        )
+                        results.extend(
+                            ClaudeImportResult(
+                                skipped.source_path,
+                                "not-attempted",
+                                message="stopped after the Codex app-server import failed",
+                            )
+                            for skipped in locked_plan.pending[index + 1 :]
+                        )
+                        break
+                    failures = completion_failures(completion)
+                    if failures:
+                        results.append(
+                            ClaudeImportResult(
+                                candidate.source_path,
+                                "failed",
+                                message="; ".join(failures),
+                            )
+                        )
+                        continue
+                    target_id = imported_target_for(
+                        candidate,
+                        layout.codex_home,
+                        locked_plan.source_root,
+                    )
+                    if target_id is None:
+                        results.append(
+                            ClaudeImportResult(
+                                candidate.source_path,
+                                "failed",
+                                message="Codex completed without a verifiable import-ledger entry",
+                            )
+                        )
+                        continue
+                    if not source_is_unchanged(candidate):
+                        results.append(
+                            ClaudeImportResult(
+                                candidate.source_path,
+                                "source-changed",
+                                imported_thread_id=target_id,
+                                message="imported snapshot completed, but Claude changed the source; run again",
+                            )
+                        )
+                        continue
+                    results.append(
+                        ClaudeImportResult(
+                            candidate.source_path,
+                            "imported",
+                            imported_thread_id=target_id,
+                        )
+                    )
+        except BaseException:
+            finalize_claude_import_backup(backup, results)
+            raise
+        finalize_claude_import_backup(backup, results)
+
+    imported_count = sum(item.status == "imported" for item in results)
+    failures = [item for item in results if item.status != "imported"]
+    payload = locked_plan.to_public_dict()
+    payload.update(
+        {
+            "backup_id": backup.path.name if backup is not None else None,
+            "backup_path": str(backup.path) if backup is not None else None,
+            "results": [item.to_public_dict() for item in results],
+            "imported": imported_count,
+            "failed": len(failures),
+        }
+    )
+    if args.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        _print_claude_plan(locked_plan)
+        print(f"\nImported into Codex: {imported_count}")
+        print(f"Failed: {len(failures)}")
+        print(f"Recovery snapshot: {backup.path}")
+        print("Claude source files were left unchanged.")
+        if imported_count:
+            print("\nNext, run `plan` to preview repository grouping for the imported tasks.")
+            print("Fully quit Codex Desktop before the separate `apply --yes` step.")
+    return 2 if failures or locked_plan.blocked else 0
+
+
 def _shared_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--codex-home", help="Codex data directory (default: $CODEX_HOME or ~/.codex)")
@@ -689,13 +936,36 @@ def _add_plan_options(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_claude_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--claude-projects",
+        metavar="PATH",
+        help=(
+            "Claude Code projects directory (default: ~/.claude/projects; "
+            "alternate roots are plan-only)"
+        ),
+    )
+    parser.add_argument(
+        "--source",
+        action="append",
+        metavar="JSONL",
+        help="import only this absolute Claude session path; repeatable",
+    )
+    parser.add_argument(
+        "--allow-large-sessions",
+        action="store_true",
+        help=f"allow sessions above the conservative message-record limit",
+    )
+    parser.add_argument("--json", action="store_true")
+
+
 def build_parser() -> argparse.ArgumentParser:
     shared = _shared_parser()
     parser = argparse.ArgumentParser(
         prog="codex-linux-repo-import",
         description=(
-            "Group Codex extension and Desktop conversations into "
-            "native Linux Codex Projects."
+            "Import Claude Code history and group Codex extension/Desktop "
+            "conversations into native Linux Codex Projects."
         ),
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -730,6 +1000,40 @@ def build_parser() -> argparse.ArgumentParser:
     rollback.add_argument("--allow-untested", action="store_true", help="allow a schema-compatible build")
     rollback.add_argument("--yes", action="store_true", help="confirm offline native state mutation")
     rollback.set_defaults(handler=_command_rollback)
+
+    claude = commands.add_parser(
+        "claude",
+        help="migrate raw Claude Code history into native Codex tasks",
+    )
+    claude_commands = claude.add_subparsers(dest="claude_command", required=True)
+
+    claude_plan = claude_commands.add_parser(
+        "plan",
+        parents=[shared],
+        help="preview raw Claude Code sessions eligible for import",
+    )
+    _add_claude_options(claude_plan)
+    claude_plan.set_defaults(handler=_command_claude_plan)
+
+    claude_import = claude_commands.add_parser(
+        "import",
+        parents=[shared],
+        help="convert reviewed Claude Code sessions with Codex's native importer",
+    )
+    _add_claude_options(claude_import)
+    claude_import.add_argument(
+        "--codex-bin",
+        default="codex",
+        help="Codex CLI executable (default: codex)",
+    )
+    claude_import.add_argument(
+        "--timeout",
+        type=_positive_float,
+        default=300.0,
+        help="per-session app-server timeout in seconds (default: 300)",
+    )
+    claude_import.add_argument("--yes", action="store_true", help="confirm Codex history mutation")
+    claude_import.set_defaults(handler=_command_claude_import)
     return parser
 
 
@@ -738,7 +1042,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return int(args.handler(args))
-    except (CliError, NativeStateError, PlannerError) as exc:
+    except (CliError, ClaudeImportError, NativeStateError, PlannerError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
