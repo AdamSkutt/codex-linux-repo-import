@@ -8,7 +8,7 @@ All notable changes to this project are documented here.
 
 - `claude plan` and `claude import --yes` for transferring direct Claude Code session history into native Codex tasks through Codex App Server's experimental migration API.
 - Complete direct-session enumeration without the App Server detector's default 30-day/50-session window.
-- Exact-hash and legacy-history deduplication, repeatable source selection, moved-workspace mappings, JSON output, and post-import ledger verification.
+- Exact-hash and legacy-history deduplication, repeatable source selection, moved-workspace blocking diagnostics, JSON output, and post-import ledger verification.
 - Private pre-import recovery snapshots containing online SQLite backup and the relevant Codex indexes, ledger, state, and prior changed-session rollout when present.
 - A dedicated Claude import safety/compatibility guide.
 
