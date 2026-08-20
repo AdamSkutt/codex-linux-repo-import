@@ -1,0 +1,56 @@
+name: Publish release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/releases/v*.md"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Publish tagged releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          descriptors=(.github/releases/v*.md)
+          if ((${#descriptors[@]} == 0)); then
+            echo "No release descriptors found."
+            exit 0
+          fi
+
+          for notes in "${descriptors[@]}"; do
+            tag="$(basename "$notes" .md)"
+            if ! git rev-parse --verify --quiet "refs/tags/${tag}^{commit}" >/dev/null; then
+              echo "::error file=${notes}::Missing Git tag ${tag}"
+              exit 1
+            fi
+
+            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "Release ${tag} already exists; leaving it unchanged."
+              continue
+            fi
+
+            gh release create "$tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --title "$tag" \
+              --notes-file "$notes"
+          done
