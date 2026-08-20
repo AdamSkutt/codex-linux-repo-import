@@ -563,9 +563,12 @@ class ClaudeCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             layout = SyntheticClaudeLayout(Path(temporary))
             layout.write_session()
+            active_home = Path(temporary) / "active-home"
+            (active_home / ".claude" / "projects").mkdir(parents=True)
             err = io.StringIO()
 
             with (
+                mock.patch.object(cli.Path, "home", return_value=active_home),
                 mock.patch.object(cli, "is_desktop_running", return_value=False),
                 redirect_stderr(err),
             ):
