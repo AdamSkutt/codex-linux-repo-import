@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented here.
 
+## [0.4.0] - 2026-08-20
+
+### Added
+
+- `claude plan` and `claude import --yes` for transferring direct Claude Code session history into native Codex tasks through Codex App Server's experimental migration API.
+- Complete direct-session enumeration without the App Server detector's default 30-day/50-session window.
+- Exact-hash and legacy-history deduplication, repeatable source selection, moved-workspace mappings, JSON output, and post-import ledger verification.
+- Private pre-import recovery snapshots containing online SQLite backup and the relevant Codex indexes, ledger, state, and prior changed-session rollout when present.
+- A dedicated Claude import safety/compatibility guide.
+
+### Security
+
+- Claude sources are current-user-owned, regular, non-symlink, non-group/world-writable files and remain byte-for-byte unchanged.
+- Import re-plans under an exclusive lock, verifies source hashes before and after conversion, refuses mutation while Codex Desktop is running, and launches App Server with offline proxy settings.
+- Oversized files/records and sessions above the conservative 16,000-message guard are blocked by default.
+- Plan output and manifests retain structural metadata only; message content is not emitted.
+
 ## [0.3.0] - 2026-08-20
 
 ### Added

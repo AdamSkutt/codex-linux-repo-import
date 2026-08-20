@@ -1,8 +1,34 @@
 # Safety and recovery
 
-The default workflow is read-only. `doctor`, `scan`, and `plan` do not modify Codex sessions or Desktop state. Only `apply --yes` and `rollback ... --yes` write native Desktop state.
+The default workflow is read-only. `doctor`, `scan`, `plan`, and `claude plan` do not modify Codex sessions or Desktop state. `claude import --yes` asks Codex App Server to create native sessions; `apply --yes` and `rollback ... --yes` write native Desktop Project state.
 
 Native Project assignment has no public API today, so every write deserves the same care as a local data migration.
+
+## Before importing Claude Code history
+
+1. Run `./codex-linux-repo-import claude plan` and inspect pending, already-imported, and blocked counts.
+2. Confirm that every recorded workspace path still exists. Codex currently treats Claude's embedded `cwd` as authoritative, so moved-workspace sessions are blocked rather than rewritten.
+3. For a selected transfer, repeat absolute `--source` options in both plan and import.
+4. Fully quit Codex Desktop. The importer refuses to mutate the shared Codex catalog while Desktop is running.
+5. Run `claude import --yes` with exactly the reviewed options.
+
+Example:
+
+```bash
+./codex-linux-repo-import claude plan \
+  --source /home/alice/.claude/projects/-work-api/session-a.jsonl
+
+# Fully quit Codex Desktop before continuing.
+./codex-linux-repo-import claude import \
+  --source /home/alice/.claude/projects/-work-api/session-a.jsonl \
+  --yes
+```
+
+The planning pass must stream all direct Claude JSONL records to compute source hashes and validate structural metadata. Codex App Server must then read message content to convert it. The importer does not emit message content in plan output, diagnostics, or backup manifests, and it never modifies the Claude source files.
+
+Before conversion, it takes a private recovery snapshot of relevant Codex database/index/ledger files. It re-plans under an exclusive lock, verifies each source before conversion, imports one session at a time, checks Codex's completion result and import ledger, then verifies the source again. Existing exact imports are skipped. Unsafe files and sessions above the conservative 16,000-record guard are blocked.
+
+The general `rollback` command does not restore Claude import snapshots. Automated removal would need to delete native rollouts and reconcile several Codex-owned indexes, so these snapshots are preserved for manual last-resort recovery only. See [Claude Code import](CLAUDE-IMPORT.md).
 
 ## Before applying
 
@@ -57,7 +83,7 @@ The target path must be absolute and represent exactly one direct child of the c
 
 The importer never deletes the fallback directory or anything inside it. This non-destructive rule also applies to rollback and interrupted applies. If an interruption leaves a newly created empty directory behind, generate a fresh plan; the next apply can safely reuse it. Delete it manually only after confirming the directory is empty and no native Project still refers to it.
 
-## What the scanner reads
+## What the Project-grouping scanner reads
 
 The scanner opens candidate session JSONL files and reads only their first line, with a size limit. A file is eligible only when the first record is `session_meta` and its provenance exactly identifies either a Codex VS Code extension parent session or a Codex Desktop parent session. The Desktop class can include direct tasks and native external-agent imports; provider identity is not inferred.
 
@@ -99,7 +125,7 @@ List available backups with:
 ./codex-linux-repo-import backups
 ```
 
-Each pre-apply backup contains:
+Each Project pre-apply backup contains:
 
 - the original native state;
 - the original native `.bak`, if one existed;
@@ -108,6 +134,8 @@ Each pre-apply backup contains:
 - the reviewed fallback-directory creation intent, when the plan included one.
 
 Backups contain native state. Plain-text plans show local project paths, while `plan --json` also contains exact native thread/Project identifiers. Keep these artifacts private, do not commit them, and redact paths and identifiers from issue reports. If you redirect JSON to a file, create it under a private directory and use restrictive permissions such as `umask 077`.
+
+Claude recovery snapshots are also listed by `backups`, with kind `claude-session-import`. They can contain an online copy of the native thread database, session index, import ledger, global state, and a prior changed-session rollout. Their manifest contains Claude source paths and hashes. Treat the whole directory as sensitive.
 
 ## Rollback
 
@@ -140,5 +168,5 @@ The tested adapter scope is exactly Linux Codex Desktop `26.803.81509`. Other bu
 1. Do not repeatedly apply.
 2. Fully quit Codex Desktop.
 3. Run `backups` and preserve the most recent pre-apply backup.
-4. Run rollback only if its selected state and scope are understood.
+4. Run rollback only for a Project `pre-apply` backup whose selected state and scope are understood. Preserve Claude snapshots for manual recovery instead.
 5. When reporting a bug, include versions and redacted diagnostics—not session files, state files, plans, backups, usernames, or full paths.

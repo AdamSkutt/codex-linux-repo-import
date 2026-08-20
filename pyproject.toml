@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codex-linux-repo-import"
-version = "0.3.0"
-description = "Group Codex extension and Desktop conversations by repository on Linux"
+version = "0.4.0"
+description = "Import Claude Code history and group Codex conversations by repository on Linux"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }

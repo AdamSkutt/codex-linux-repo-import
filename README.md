@@ -12,14 +12,14 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License"></a>
 </p>
 
-Turn a flat Codex Linux history into native Projects grouped by repository or workspace. The tool organizes both Codex VS Code extension conversations and Codex Desktop parent conversations, including conversations already brought in through Desktop's external-agent import flow.
+Bring raw Claude Code history into native Codex tasks, then turn a flat Codex Linux history into Projects grouped by repository or workspace. The grouping flow covers Codex VS Code extension conversations, Codex Desktop parent conversations, and the Claude sessions converted by this tool.
 
-It is local-first, dry-run by default, dependency-free at runtime, and designed around verified backup and rollback.
+It is local-first, dependency-free at runtime, dry-run first, and designed around source immutability, deduplication, and recovery snapshots.
 
 If this fixes your flat Codex sidebar, [star the repository](https://github.com/AdamSkutt/codex-linux-repo-import) so other Linux Codex users can find it.
 
 > [!IMPORTANT]
-> This is an independent, early-stage compatibility tool. It is not an official OpenAI project. Native Desktop Project assignment currently has no public API, so `apply` uses a version-gated adapter for the local Desktop state format. The adapter is tested only with Linux Codex Desktop `26.803.81509`.
+> This is an independent, early-stage compatibility tool. It is not an official OpenAI project. Claude conversion uses Codex App Server's experimental external-agent migration API, tested here with Codex CLI `0.133.0`. Native Desktop Project assignment has no public API, so the separate `apply` command uses a version-gated local-state adapter tested only with Linux Codex Desktop `26.803.81509`.
 
 ## Before and after
 
@@ -50,29 +50,60 @@ Native change plan
 Dry-run only. No files were changed.
 ```
 
-Nothing is changed until you fully quit Codex Desktop and explicitly run `apply --yes`.
+The grouping commands remain unchanged: nothing is written until you fully quit Codex Desktop and explicitly run `apply --yes`.
+
+## Claude Code to Codex
+
+Preview every eligible direct Claude Code session under `~/.claude/projects`:
+
+```bash
+codex-linux-repo-import claude plan
+```
+
+Import the reviewed set into native Codex history:
+
+```bash
+# Fully quit Codex Desktop first.
+codex-linux-repo-import claude import --yes
+```
+
+The importer enumerates direct session JSONL files itself, so it does not inherit Codex's current default external-agent detection window of 30 days and 50 sessions. It imports one session at a time through Codex's own conversion engine, then verifies Codex's import ledger before reporting success. Already imported files are skipped by exact content hash or compatible legacy import history.
+
+Claude source files are never modified, moved, renamed, or deleted. `claude plan` is read-only. `claude import --yes` creates a private recovery snapshot of relevant Codex state before mutation, rechecks every source hash, and blocks sessions above 16,000 message records unless `--allow-large-sessions` is explicitly supplied.
+
+The recorded workspace directory must still exist. Codex's current Claude parser
+treats the `cwd` embedded in the JSONL as authoritative and does not apply a
+migration-item path override. The importer therefore blocks moved-workspace
+sessions instead of claiming that a remap succeeded or rewriting Claude data.
+The separate native Project-grouping commands still support `--map OLD=NEW`.
+
+Use repeatable `--source /absolute/session.jsonl` options to transfer only selected sessions. An alternate `--claude-projects` path can be inspected by `claude plan`, but Codex App Server currently imports only from the active user's real `~/.claude/projects`; the tool refuses to shadow `HOME`. After conversion, run the normal `plan` and `apply --yes` flow if you also want the new Codex tasks grouped into native Projects. See [Claude Code import](docs/CLAUDE-IMPORT.md) for the exact data, safety, and compatibility contract.
 
 ## What it does
 
+- Discovers all direct Claude Code session files, including old sessions outside Codex's default detector window.
+- Converts reviewed Claude sessions through Codex App Server's native external-agent migration path; no home-grown transcript format is written.
+- Deduplicates imports, validates workspace paths, blocks unsafe sources, and takes a private recovery snapshot before Codex mutation.
 - Finds eligible parent conversations from the Codex VS Code extension and Codex Desktop, including native external-agent imports.
-- Reads only the first `session_meta` line of each JSONL session file. Prompts, responses, commands, patches, and tool output are never read.
+- During the separate grouping flow, reads only the first `session_meta` line of each native Codex JSONL session file. Prompts, responses, commands, patches, and tool output are never read by that scanner.
 - Resolves each recorded working directory to a Git root, or to the exact workspace directory when it is not a Git repository.
 - Groups conversations into native local Projects and ranks Projects by frequency, recency, active days, history span, and continuity.
 - Reports provenance as `vscode-extension` or `codex-desktop`. The latter can include both direct Desktop tasks and native external-agent imports, so no provider is guessed.
 - Can optionally collect conversations whose original workspace is missing or too broad into one native `Unlinked Codex Chats` Project.
 - Produces a dry-run plan by default, creates a verified backup before every apply, and supports guarded rollback.
 
-It does **not** convert raw Claude, Cursor, Gemini, or other provider files into Codex sessions. Use Codex Desktop's own external-agent import first where available; this tool organizes the resulting native Codex tasks. It never modifies, moves, or rewrites session JSONL files or the native thread SQLite database.
+Raw external-agent conversion currently supports **Claude Code session history only**. It does not ingest Claude Cowork/Desktop, Cursor, Gemini, or arbitrary chat exports. It never modifies Claude source JSONL. The Project-grouping flow never modifies native Codex rollout JSONL or the thread SQLite database; the Claude import flow asks Codex App Server to create those native artifacts.
 
 ## Requirements
 
 - Linux
 - Python 3.11 or newer
 - Git, for repository-root detection
+- Codex CLI with the experimental external-migration capability; `0.133.0` is the tested Claude-import version
 - Codex Desktop `26.803.81509` for the tested apply path
-- Codex Desktop fully quit before `apply` or `rollback`
+- Codex Desktop fully quit before `claude import`, `apply`, or `rollback` writes
 
-Scanning and planning are read-only. On an untested Desktop version, applying is refused by default even if the state shape looks compatible. See [Compatibility](docs/COMPATIBILITY.md).
+Both `claude plan` and the Project `scan`/`plan` commands are read-only. On an untested Desktop version, Project assignment is refused by default even if the state shape looks compatible. See [Compatibility](docs/COMPATIBILITY.md).
 
 ## Install and run
 
@@ -81,6 +112,7 @@ Install directly from GitHub with `pipx`:
 ```bash
 pipx install git+https://github.com/AdamSkutt/codex-linux-repo-import.git
 codex-linux-repo-import doctor
+codex-linux-repo-import claude plan
 codex-linux-repo-import scan
 codex-linux-repo-import plan
 ```
@@ -92,6 +124,7 @@ git clone https://github.com/AdamSkutt/codex-linux-repo-import.git
 cd codex-linux-repo-import
 
 ./codex-linux-repo-import doctor
+./codex-linux-repo-import claude plan
 ./codex-linux-repo-import scan
 ./codex-linux-repo-import plan
 ```
@@ -168,7 +201,9 @@ codex-linux-repo-import backups
 codex-linux-repo-import rollback BACKUP_ID --yes
 ```
 
-Rollback is conflict-aware: if Codex changed an importer-owned state key after the import, restoration stops instead of overwriting newer state. A second safety backup is created before rollback. See [Safety and recovery](docs/SAFETY.md).
+For Project assignment, rollback is conflict-aware: if Codex changed an importer-owned state key after the apply, restoration stops instead of overwriting newer state. A second safety backup is created before rollback.
+
+Claude import snapshots appear in `backups` with kind `claude-session-import`, but the automatic `rollback` command intentionally accepts only Project-assignment backups. Native session conversion touches a wider Codex-owned data model; restoring a Claude snapshot is a manual last-resort recovery procedure, not a routine undo. See [Safety and recovery](docs/SAFETY.md).
 
 ## How grouping works
 
@@ -190,9 +225,11 @@ Write operations are therefore conservative: strict state validation, an exact t
 
 ## Privacy
 
-The scanner reads each candidate session file only far enough to parse its first JSONL record. It uses allowlisted metadata such as task ID, timestamp, working directory, originator, source, and fork parent ID. It never inspects conversation content.
+The native Codex grouping scanner reads each candidate rollout only far enough to parse its first JSONL record. It uses allowlisted metadata such as task ID, timestamp, working directory, originator, source, and fork parent ID. It never inspects conversation content.
 
-Plain-text output displays local project paths. A JSON plan also contains native task/Project identifiers, and backups contain native state. Treat these artifacts as private and do not publish them in bug reports.
+Claude conversion necessarily has a different boundary: the planning pass streams every selected Claude JSONL record to hash the file and inspect structural metadata, and Codex App Server then reads the conversation content to create a native Codex task. Message content is not placed in plan output, diagnostics, or backup manifests. The source file itself remains byte-for-byte unchanged, while the newly created native Codex rollout contains the imported conversation by design.
+
+Plain-text output displays local project paths. JSON plans can contain local source paths and native task/Project identifiers, and backups contain native state. Treat these artifacts as private and do not publish them in bug reports.
 
 Repository artwork and demo output use synthetic names and paths only. The self-contained HTML sources make no external requests.
 

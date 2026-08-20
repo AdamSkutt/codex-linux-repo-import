@@ -2,7 +2,7 @@
 
 ## Supported scope
 
-Security fixes are applied to the latest release line. Native state writes are supported only for the Desktop builds explicitly listed in [Compatibility](docs/COMPATIBILITY.md); at present, the only tested build is Linux Codex Desktop `26.803.81509`.
+Security fixes are applied to the latest release line. Claude conversion is tested with Codex CLI `0.133.0`; the App Server external-agent protocol is experimental. Native Project-state writes are supported only for the Desktop builds explicitly listed in [Compatibility](docs/COMPATIBILITY.md); at present, the only tested build is Linux Codex Desktop `26.803.81509`.
 
 ## Reporting a vulnerability
 
@@ -15,6 +15,6 @@ Include:
 - minimal reproduction steps using synthetic data;
 - the expected and observed result.
 
-Never attach real session JSONL files, native state files, plans, backups, thread IDs, usernames, secrets, or full local paths.
+Never attach real Claude or Codex session JSONL files, native state files, import ledgers, plans, backups, thread IDs, usernames, secrets, or full local paths.
 
 Ordinary bugs that do not disclose sensitive information can be filed in the public issue tracker.
